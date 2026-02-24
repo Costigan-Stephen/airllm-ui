@@ -605,7 +605,7 @@ UI_HTML = """<!doctype html>
     }
     .shell {
       display: grid;
-      grid-template-columns: 260px 1fr;
+      grid-template-columns: 340px 1fr;
       min-height: 100vh;
     }
     .sidebar {
@@ -613,11 +613,17 @@ UI_HTML = """<!doctype html>
       background: color-mix(in srgb, var(--panel) 92%, transparent);
       backdrop-filter: blur(8px);
       padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
     }
     .brand {
       font-size: 18px;
       font-weight: 700;
-      margin-bottom: 16px;
+    }
+    .sidebar-nav {
+      display: grid;
+      gap: 8px;
     }
     .tab-btn {
       width: 100%;
@@ -640,15 +646,140 @@ UI_HTML = """<!doctype html>
       color: var(--accent-text);
       border-color: var(--accent);
     }
-    .meta {
-      margin-top: 16px;
-      padding: 10px;
+    .conversation-card {
       border: 1px solid var(--border);
       border-radius: 10px;
       background: var(--panel);
+      padding: 10px;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 8px;
+    }
+    .conversation-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .conversation-actions {
+      display: inline-flex;
+      gap: 6px;
+    }
+    .btn.xs {
+      font-size: 11px;
+      padding: 5px 8px;
+    }
+    .conversation-list {
+      display: grid;
+      gap: 6px;
+      overflow: auto;
+      max-height: calc(100vh - 260px);
+      padding-right: 2px;
+    }
+    .conversation-item-row {
+      position: relative;
+    }
+    .conversation-item {
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--border);
+      background: var(--panel-soft);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 72px 8px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .conversation-rename-input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      padding: 8px 72px 8px 10px;
+    }
+    .conversation-item-controls {
+      position: absolute;
+      right: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      gap: 4px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+      background: color-mix(in srgb, var(--panel) 85%, transparent);
+      border-radius: 8px;
+      padding: 2px;
+    }
+    .conversation-item-row:hover .conversation-item-controls,
+    .conversation-item-row:focus-within .conversation-item-controls,
+    .conversation-item-row.editing .conversation-item-controls {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .icon-btn-sm {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      border-radius: 6px;
+      min-width: 26px;
+      height: 26px;
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 6px;
+    }
+    .icon-btn-sm:hover {
+      border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+      color: var(--text);
+    }
+    .icon-btn-sm svg {
+      width: 14px;
+      height: 14px;
+      display: block;
+    }
+    .icon-btn-sm.confirm {
+      background: #16a34a;
+      border-color: #16a34a;
+      color: #ffffff;
+    }
+    .icon-btn-sm.confirm:hover {
+      background: #15803d;
+      border-color: #15803d;
+      color: #ffffff;
+    }
+    .icon-btn-sm.delete {
+      background: #dc2626;
+      border-color: #dc2626;
+      color: #ffffff;
+    }
+    .icon-btn-sm.delete:hover {
+      background: #b91c1c;
+      border-color: #b91c1c;
+      color: #ffffff;
+    }
+    .conversation-item.active {
+      background: var(--accent);
+      color: var(--accent-text);
+      border-color: var(--accent);
+    }
+    .conversation-empty {
       font-size: 12px;
       color: var(--muted);
-      white-space: pre-wrap;
+      padding: 6px 2px;
     }
     .main {
       display: grid;
@@ -682,6 +813,16 @@ UI_HTML = """<!doctype html>
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .topbar-model.error {
+      color: #ef4444;
+      font-weight: 700;
+    }
+    .topbar-model.clickable {
+      cursor: pointer;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 2px;
     }
     .icon-btn {
       border: 1px solid var(--border);
@@ -755,6 +896,10 @@ UI_HTML = """<!doctype html>
       color: var(--text);
       transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
+    textarea:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
     textarea:focus, input:focus, select:focus {
       outline: none;
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
@@ -799,6 +944,11 @@ UI_HTML = """<!doctype html>
     }
     .inline { display: inline-flex; align-items: center; gap: 8px; }
     .small { font-size: 12px; color: var(--muted); }
+    .chat-composer-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
     #settingsStatus {
       white-space: pre-wrap;
       background: var(--panel-soft);
@@ -930,9 +1080,22 @@ UI_HTML = """<!doctype html>
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">AirLLM UI</div>
-      <button id="tabChatBtn" class="tab-btn active" onclick="switchTab('chat')">Chat</button>
-      <button id="tabSettingsBtn" class="tab-btn" onclick="switchTab('settings')">Settings</button>
-      <div id="runtimeMeta" class="meta">Loading...</div>
+      <div class="sidebar-nav">
+        <button id="tabChatBtn" class="tab-btn active" onclick="switchTab('chat')">Chat</button>
+        <button id="tabSettingsBtn" class="tab-btn" onclick="switchTab('settings')">Settings</button>
+      </div>
+      <div id="conversationSection" class="conversation-card">
+        <div class="conversation-header">
+          <span>Conversations</span>
+          <div class="conversation-actions">
+            <button class="btn xs" onclick="newConversation()">New</button>
+          </div>
+        </div>
+        <div class="small">Context is kept per conversation.</div>
+        <div id="conversationList" class="conversation-list">
+          <div class="conversation-empty">No conversations yet.</div>
+        </div>
+      </div>
     </aside>
 
     <main class="main">
@@ -951,20 +1114,11 @@ UI_HTML = """<!doctype html>
               <div class="message assistant">AirLLM is ready. Open Settings to choose model source, then send a prompt.</div>
             </div>
             <div class="composer">
+              <div id="activeConversationLabel" class="small">Conversation: -</div>
               <textarea id="prompt" placeholder="Type a message. Enter to send, Shift+Enter for a new line."></textarea>
-              <div class="row">
-                <div>
-                  <span class="label">Max New Tokens</span>
-                  <input id="maxNewTokens" type="number" value="64" min="1" max="1024" />
-                </div>
-                <div>
-                  <span class="label">Do Sample (true/false)</span>
-                  <input id="doSample" value="false" />
-                </div>
-              </div>
-              <div style="display:flex; justify-content:flex-end;">
-                <span class="small" style="margin-right:auto; align-self:center;">Press Enter to send</span>
-                <button class="btn primary" onclick="sendPrompt()">Send</button>
+              <div class="chat-composer-actions">
+                <span id="chatInputHint" class="small" style="margin-right:auto; align-self:center;">Press Enter to send</span>
+                <button id="chatSendBtn" class="btn primary" onclick="sendPrompt()">Send</button>
               </div>
             </div>
           </div>
@@ -973,6 +1127,7 @@ UI_HTML = """<!doctype html>
         <section id="settingsPanel" class="panel">
           <div class="settings-tabs">
             <button id="settingsTabConfigBtn" class="settings-tab-btn active" onclick="switchSettingsTab('config')">Model Config</button>
+            <button id="settingsTabPromptBtn" class="settings-tab-btn" onclick="switchSettingsTab('prompt')">Prompt Settings</button>
             <button id="settingsTabDownloadBtn" class="settings-tab-btn" onclick="switchSettingsTab('download')">Hugging Face Download <span id="settingsDownloadBadge" class="download-badge hidden">Downloading</span></button>
           </div>
 
@@ -1056,9 +1211,45 @@ UI_HTML = """<!doctype html>
             </div>
           </div>
 
+          <div id="settingsPromptPanel" class="settings-subpanel">
+            <div class="card">
+              <h3>Prompt Settings</h3>
+              <span class="label">System Context (optional)</span>
+              <textarea id="systemContext" placeholder="Example: You are a concise assistant focused on code quality and practical recommendations."></textarea>
+              <div class="row">
+                <div>
+                  <span class="label">Max New Tokens</span>
+                  <input id="maxNewTokens" type="number" value="64" min="1" max="1024" />
+                </div>
+                <div>
+                  <span class="label">Do Sample</span>
+                  <select id="doSample">
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                </div>
+              </div>
+              <div class="row">
+                <div>
+                  <span class="label">History Turns</span>
+                  <input id="historyTurns" type="number" value="6" min="0" max="40" />
+                </div>
+                <div></div>
+              </div>
+              <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn" onclick="savePromptSettings()">Save Prompt Settings</button>
+              </div>
+              <div class="small" style="margin-top:8px;">Context and prompt settings are stored in your browser.</div>
+            </div>
+          </div>
+
           <div class="card">
             <h3>Settings Status</h3>
             <div id="settingsStatus">No actions yet.</div>
+          </div>
+          <div class="card">
+            <h3>Runtime Status</h3>
+            <div id="runtimeMeta" class="log-box">Loading...</div>
           </div>
         </section>
       </div>
@@ -1106,6 +1297,372 @@ UI_HTML = """<!doctype html>
     let activeDownloadJobId = null;
     let downloadPollTimer = null;
     let pendingLoadPayload = null;
+    let hasModelIssue = false;
+    const CONVERSATION_STORAGE_KEY = "airllm_conversations_v1";
+    const ACTIVE_CONVERSATION_STORAGE_KEY = "airllm_active_conversation_v1";
+    const PROMPT_SETTINGS_STORAGE_KEY = "airllm_prompt_settings_v1";
+    let conversations = [];
+    let activeConversationId = null;
+    let editingConversationId = null;
+
+    function newId(prefix) {
+      return prefix + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+    }
+
+    function defaultConversationTitle() {
+      return "Chat " + (conversations.length + 1);
+    }
+
+    function createConversationObject(title = null) {
+      const now = Date.now();
+      return {
+        id: newId("conv"),
+        title: (title || defaultConversationTitle()).trim(),
+        messages: [],
+        created_at: now,
+        updated_at: now,
+      };
+    }
+
+    function getActiveConversation() {
+      return conversations.find((item) => item.id === activeConversationId) || null;
+    }
+
+    function saveConversationsState() {
+      localStorage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(conversations));
+      localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId || "");
+    }
+
+    function loadConversationsState() {
+      let parsed = [];
+      try {
+        const raw = localStorage.getItem(CONVERSATION_STORAGE_KEY);
+        parsed = raw ? JSON.parse(raw) : [];
+      } catch (_) {
+        parsed = [];
+      }
+      if (!Array.isArray(parsed)) {
+        parsed = [];
+      }
+      conversations = parsed
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          id: item.id || newId("conv"),
+          title: (item.title || "Chat").trim() || "Chat",
+          messages: Array.isArray(item.messages)
+            ? item.messages
+                .filter((msg) => msg && typeof msg === "object" && (msg.role === "user" || msg.role === "assistant"))
+                .map((msg) => ({
+                  id: msg.id || newId("msg"),
+                  role: msg.role,
+                  text: String(msg.text || ""),
+                }))
+            : [],
+          created_at: Number(item.created_at || Date.now()),
+          updated_at: Number(item.updated_at || Date.now()),
+        }));
+      if (!conversations.length) {
+        const created = createConversationObject("Chat 1");
+        conversations = [created];
+        activeConversationId = created.id;
+        saveConversationsState();
+        return;
+      }
+      const storedActive = localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+      activeConversationId = conversations.some((item) => item.id === storedActive) ? storedActive : conversations[0].id;
+      saveConversationsState();
+    }
+
+    function updateTopbarTitle() {
+      const isChat = document.getElementById("chatPanel").classList.contains("active");
+      if (isChat) {
+        const conv = getActiveConversation();
+        document.getElementById("topbarTitle").textContent = conv ? conv.title : "Chat";
+        document.getElementById("activeConversationLabel").textContent = "Conversation: " + (conv ? conv.title : "-");
+      } else {
+        document.getElementById("topbarTitle").textContent = "Settings";
+      }
+    }
+
+    function renderConversationList() {
+      const list = document.getElementById("conversationList");
+      list.innerHTML = "";
+      if (!conversations.length) {
+        list.innerHTML = '<div class="conversation-empty">No conversations yet.</div>';
+        return;
+      }
+      for (const conv of conversations) {
+        const row = document.createElement("div");
+        const isEditing = editingConversationId === conv.id;
+        row.className = "conversation-item-row" + (isEditing ? " editing" : "");
+
+        if (isEditing) {
+          const input = document.createElement("input");
+          input.className = "conversation-rename-input";
+          input.type = "text";
+          input.value = conv.title || "Chat";
+          input.maxLength = 120;
+          input.setAttribute("data-conversation-id", conv.id);
+          input.onclick = (e) => e.stopPropagation();
+          input.onkeydown = (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              confirmInlineRename(conv.id, input.value);
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancelInlineRename();
+            }
+          };
+          row.appendChild(input);
+        } else {
+          const btn = document.createElement("button");
+          btn.className = "conversation-item" + (conv.id === activeConversationId ? " active" : "");
+          btn.textContent = conv.title || "Chat";
+          btn.title = conv.title || "Chat";
+          btn.onclick = () => selectConversation(conv.id);
+          row.appendChild(btn);
+        }
+
+        const controls = document.createElement("div");
+        controls.className = "conversation-item-controls";
+
+        if (isEditing) {
+          const confirmBtn = document.createElement("button");
+          confirmBtn.className = "icon-btn-sm confirm";
+          confirmBtn.title = "Confirm rename";
+          confirmBtn.innerHTML = "&#10003;";
+          confirmBtn.onclick = (e) => {
+            e.stopPropagation();
+            const input = row.querySelector(".conversation-rename-input");
+            confirmInlineRename(conv.id, input ? input.value : conv.title);
+          };
+
+          const cancelBtn = document.createElement("button");
+          cancelBtn.className = "icon-btn-sm";
+          cancelBtn.title = "Cancel rename";
+          cancelBtn.innerHTML = "&#10005;";
+          cancelBtn.onclick = (e) => {
+            e.stopPropagation();
+            cancelInlineRename();
+          };
+
+          controls.appendChild(confirmBtn);
+          controls.appendChild(cancelBtn);
+        } else {
+          const renameBtn = document.createElement("button");
+          renameBtn.className = "icon-btn-sm";
+          renameBtn.title = "Rename conversation";
+          renameBtn.innerHTML = "&#9998;";
+          renameBtn.onclick = (e) => {
+            e.stopPropagation();
+            startInlineRename(conv.id);
+          };
+
+          const deleteBtn = document.createElement("button");
+          deleteBtn.className = "icon-btn-sm delete";
+          deleteBtn.title = "Delete conversation";
+          deleteBtn.innerHTML =
+            '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 3h6l1 2h5v2H3V5h5l1-2zm-2 6h2v9H7V9zm4 0h2v9h-2V9zm4 0h2v9h-2V9z"/></svg>';
+          deleteBtn.onclick = (e) => {
+            e.stopPropagation();
+            deleteConversation(conv.id);
+          };
+
+          controls.appendChild(renameBtn);
+          controls.appendChild(deleteBtn);
+        }
+
+        row.appendChild(controls);
+        list.appendChild(row);
+
+        if (isEditing) {
+          setTimeout(() => {
+            const input = row.querySelector(".conversation-rename-input");
+            if (!input) return;
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+          }, 0);
+        }
+      }
+    }
+
+    function renderMessages() {
+      const box = document.getElementById("messages");
+      const conv = getActiveConversation();
+      box.innerHTML = "";
+      if (!conv || !conv.messages.length) {
+        const empty = document.createElement("div");
+        empty.className = "message assistant";
+        empty.textContent = "AirLLM is ready. Open Settings to choose model source, then send a prompt.";
+        box.appendChild(empty);
+        box.scrollTop = box.scrollHeight;
+        return;
+      }
+      for (const msg of conv.messages) {
+        const el = document.createElement("div");
+        el.className = "message " + msg.role;
+        el.textContent = msg.text;
+        box.appendChild(el);
+      }
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function selectConversation(conversationId) {
+      if (!conversations.some((item) => item.id === conversationId)) return;
+      editingConversationId = null;
+      activeConversationId = conversationId;
+      saveConversationsState();
+      renderConversationList();
+      renderMessages();
+      updateTopbarTitle();
+    }
+
+    function newConversation() {
+      const title = prompt("Conversation name", defaultConversationTitle());
+      if (title === null) return;
+      const conv = createConversationObject(title.trim() || defaultConversationTitle());
+      conversations.unshift(conv);
+      activeConversationId = conv.id;
+      saveConversationsState();
+      renderConversationList();
+      renderMessages();
+      updateTopbarTitle();
+    }
+
+    function startInlineRename(conversationId) {
+      if (!conversations.some((item) => item.id === conversationId)) return;
+      editingConversationId = conversationId;
+      renderConversationList();
+    }
+
+    function cancelInlineRename() {
+      editingConversationId = null;
+      renderConversationList();
+    }
+
+    function confirmInlineRename(conversationId, nextTitleRaw) {
+      const conv = conversations.find((item) => item.id === conversationId);
+      if (!conv) return;
+      const nextTitle = String(nextTitleRaw || "").trim();
+      if (!nextTitle) {
+        cancelInlineRename();
+        return;
+      }
+      conv.title = nextTitle;
+      conv.updated_at = Date.now();
+      editingConversationId = null;
+      saveConversationsState();
+      renderConversationList();
+      if (conversationId === activeConversationId) {
+        updateTopbarTitle();
+      }
+    }
+
+    function deleteConversation(conversationId) {
+      const conv = conversations.find((item) => item.id === conversationId);
+      if (!conv) return;
+      if (!confirm('Delete conversation "' + (conv.title || "Chat") + '"?')) return;
+      editingConversationId = null;
+      conversations = conversations.filter((item) => item.id !== conv.id);
+      if (!conversations.length) {
+        const fallback = createConversationObject("Chat 1");
+        conversations.push(fallback);
+        activeConversationId = fallback.id;
+      } else {
+        activeConversationId = conversations[0].id;
+      }
+      saveConversationsState();
+      renderConversationList();
+      renderMessages();
+      updateTopbarTitle();
+    }
+
+    function appendMessage(role, text, conversationId = activeConversationId) {
+      const conv = conversations.find((item) => item.id === conversationId);
+      if (!conv) return null;
+      const msg = { id: newId("msg"), role: role, text: String(text) };
+      conv.messages.push(msg);
+      conv.updated_at = Date.now();
+      saveConversationsState();
+      if (conversationId === activeConversationId) {
+        renderMessages();
+      }
+      return msg.id;
+    }
+
+    function updateMessageText(messageId, text, conversationId = activeConversationId) {
+      const conv = conversations.find((item) => item.id === conversationId);
+      if (!conv) return;
+      const target = conv.messages.find((item) => item.id === messageId);
+      if (!target) return;
+      target.text = String(text || "");
+      conv.updated_at = Date.now();
+      saveConversationsState();
+      if (conversationId === activeConversationId) {
+        renderMessages();
+      }
+    }
+
+    function loadPromptSettings() {
+      const defaults = {
+        max_new_tokens: 64,
+        do_sample: "false",
+        history_turns: 6,
+        system_context: "",
+      };
+      let parsed = {};
+      try {
+        parsed = JSON.parse(localStorage.getItem(PROMPT_SETTINGS_STORAGE_KEY) || "{}");
+      } catch (_) {
+        parsed = {};
+      }
+      const settings = {
+        max_new_tokens: Number(parsed.max_new_tokens || defaults.max_new_tokens),
+        do_sample: parsed.do_sample === "true" ? "true" : defaults.do_sample,
+        history_turns: Number(parsed.history_turns || defaults.history_turns),
+        system_context: String(parsed.system_context || defaults.system_context),
+      };
+      document.getElementById("maxNewTokens").value = String(settings.max_new_tokens);
+      document.getElementById("doSample").value = settings.do_sample;
+      document.getElementById("historyTurns").value = String(settings.history_turns);
+      document.getElementById("systemContext").value = settings.system_context;
+    }
+
+    function savePromptSettings(showStatus = true) {
+      const payload = {
+        max_new_tokens: Number(document.getElementById("maxNewTokens").value || 64),
+        do_sample: String(document.getElementById("doSample").value || "false").toLowerCase() === "true" ? "true" : "false",
+        history_turns: Number(document.getElementById("historyTurns").value || 6),
+        system_context: String(document.getElementById("systemContext").value || ""),
+      };
+      localStorage.setItem(PROMPT_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
+      if (showStatus) {
+        setSettingsStatus({ status: "prompt_settings_saved", ...payload });
+      }
+    }
+
+    function buildModelPrompt(userPrompt) {
+      const conv = getActiveConversation();
+      const context = String(document.getElementById("systemContext").value || "").trim();
+      const historyTurns = Math.max(0, Number(document.getElementById("historyTurns").value || 6));
+      const parts = [];
+      if (context) {
+        parts.push("System context:\\n" + context);
+      }
+      if (conv) {
+        const history = conv.messages.filter((item) => item.role === "user" || item.role === "assistant");
+        const maxMessages = historyTurns * 2;
+        const recent = maxMessages > 0 ? history.slice(-maxMessages) : [];
+        if (recent.length) {
+          parts.push(
+            "Conversation history:\\n" +
+              recent.map((msg) => (msg.role === "user" ? "User: " : "Assistant: ") + msg.text).join("\\n\\n")
+          );
+        }
+      }
+      parts.push("User: " + userPrompt + "\\nAssistant:");
+      return parts.join("\\n\\n");
+    }
 
     function switchTab(tab) {
       const isChat = tab === "chat";
@@ -1113,7 +1670,7 @@ UI_HTML = """<!doctype html>
       document.getElementById("settingsPanel").classList.toggle("active", !isChat);
       document.getElementById("tabChatBtn").classList.toggle("active", isChat);
       document.getElementById("tabSettingsBtn").classList.toggle("active", !isChat);
-      document.getElementById("topbarTitle").textContent = isChat ? "Chat" : "Settings";
+      updateTopbarTitle();
     }
 
     function setDownloadTabIndicator(active) {
@@ -1161,10 +1718,14 @@ UI_HTML = """<!doctype html>
 
     function switchSettingsTab(tab) {
       const isConfig = tab === "config";
+      const isPrompt = tab === "prompt";
+      const isDownload = tab === "download";
       document.getElementById("settingsConfigPanel").classList.toggle("active", isConfig);
-      document.getElementById("settingsDownloadPanel").classList.toggle("active", !isConfig);
+      document.getElementById("settingsPromptPanel").classList.toggle("active", isPrompt);
+      document.getElementById("settingsDownloadPanel").classList.toggle("active", isDownload);
       document.getElementById("settingsTabConfigBtn").classList.toggle("active", isConfig);
-      document.getElementById("settingsTabDownloadBtn").classList.toggle("active", !isConfig);
+      document.getElementById("settingsTabPromptBtn").classList.toggle("active", isPrompt);
+      document.getElementById("settingsTabDownloadBtn").classList.toggle("active", isDownload);
       applySettingsThemeFixes();
     }
 
@@ -1198,6 +1759,7 @@ UI_HTML = """<!doctype html>
 
       const tabButtons = [
         document.getElementById("settingsTabConfigBtn"),
+        document.getElementById("settingsTabPromptBtn"),
         document.getElementById("settingsTabDownloadBtn"),
       ];
       for (const btn of tabButtons) {
@@ -1218,18 +1780,77 @@ UI_HTML = """<!doctype html>
       return parts.length ? parts[parts.length - 1] : src;
     }
 
+    function openModelIssueSettings() {
+      switchTab("settings");
+      switchSettingsTab("config");
+      const target = document.getElementById("modelPath") || document.getElementById("modelId");
+      if (target) {
+        target.focus();
+      }
+    }
+
+    function setChatComposerEnabled(enabled, issueMessage = "") {
+      const promptBox = document.getElementById("prompt");
+      const sendBtn = document.getElementById("chatSendBtn");
+      const hint = document.getElementById("chatInputHint");
+      if (promptBox) {
+        promptBox.disabled = !enabled;
+      }
+      if (sendBtn) {
+        sendBtn.disabled = !enabled;
+      }
+      if (hint) {
+        hint.textContent = enabled
+          ? "Press Enter to send"
+          : (issueMessage || "Model issue detected. Open Settings to resolve before chatting.");
+      }
+    }
+
+    function applyTopbarModelState(isError, message) {
+      const topbarModel = document.getElementById("topbarModel");
+      if (!topbarModel) return;
+      hasModelIssue = !!isError;
+      topbarModel.classList.toggle("error", !!isError);
+      topbarModel.classList.toggle("clickable", !!isError);
+      if (isError) {
+        topbarModel.title = message || "Model issue detected. Click to open settings.";
+        topbarModel.onclick = openModelIssueSettings;
+        setChatComposerEnabled(false, message);
+      } else {
+        topbarModel.title = "";
+        topbarModel.onclick = null;
+        setChatComposerEnabled(true, "");
+      }
+    }
+
+    async function refreshModelIssueIndicator(data) {
+      if (data && data.model_loaded) {
+        applyTopbarModelState(false, "");
+        return;
+      }
+      let issueMessage = "Model is not loaded. Click to open Settings and select/load a model.";
+      try {
+        const resolved = await apiJson("/model/resolve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model_id: (data && data.model_id) || null,
+            model_path: (data && data.model_path) || null,
+            model_base_dir: (data && data.model_base_dir) || null,
+            device: (data && data.device) || null
+          })
+        });
+        if (resolved && resolved.local_expected && resolved.exists === false) {
+          issueMessage = "Configured local model path is missing. Click to open Settings and pick another model.";
+        }
+      } catch (_) {
+      }
+      applyTopbarModelState(true, issueMessage);
+    }
+
     function setSettingsStatus(obj) {
       document.getElementById("settingsStatus").textContent = JSON.stringify(obj, null, 2);
       applySettingsThemeFixes();
-    }
-
-    function appendMessage(role, text) {
-      const box = document.getElementById("messages");
-      const el = document.createElement("div");
-      el.className = "message " + role;
-      el.textContent = text;
-      box.appendChild(el);
-      box.scrollTop = box.scrollHeight;
     }
 
     function asBool(value) {
@@ -1240,10 +1861,16 @@ UI_HTML = """<!doctype html>
       const response = await fetch(url, options);
       const data = await response.json();
       if (!response.ok) {
+        let message = "";
         if (data && typeof data === "object" && data.detail) {
-          throw new Error(String(data.detail));
+          message = String(data.detail);
+        } else {
+          message = typeof data === "object" ? JSON.stringify(data) : String(data);
         }
-        throw new Error(typeof data === "object" ? JSON.stringify(data) : String(data));
+        const error = new Error(message);
+        error.status = response.status;
+        error.payload = data;
+        throw error;
       }
       return data;
     }
@@ -1468,7 +2095,9 @@ UI_HTML = """<!doctype html>
       const data = await apiJson("/health");
       lastStatus = data;
       document.getElementById("runtimeMeta").textContent = JSON.stringify(data, null, 2);
-      document.getElementById("topbarModel").textContent = "Model: " + modelDisplayName(data);
+      const modelLabel = modelDisplayName(data);
+      document.getElementById("topbarModel").textContent = "Model: " + modelLabel + (data.model_loaded ? "" : " (Issue)");
+      await refreshModelIssueIndicator(data);
       document.getElementById("modelId").value = data.model_id || "";
       document.getElementById("modelPath").value = data.model_path || "";
       document.getElementById("modelBaseDir").value = data.model_base_dir || "";
@@ -1507,6 +2136,24 @@ UI_HTML = """<!doctype html>
       await refreshStatus();
     }
 
+    async function redirectToDownloadAndStart(modelId, cause) {
+      const resolvedModelId = String(modelId || "").trim();
+      if (!resolvedModelId) {
+        throw new Error("Model load failed with 500, but no model_id is set for auto-download.");
+      }
+      document.getElementById("hfModelId").value = resolvedModelId;
+      document.getElementById("hfSetActive").checked = true;
+      switchTab("settings");
+      switchSettingsTab("download");
+      setSettingsStatus({
+        status: "auto_download_triggered_after_load_500",
+        model_id: resolvedModelId,
+        cause: String(cause || "load failed"),
+      });
+      appendMessage("assistant", "Load failed (500). Starting Hugging Face download for " + resolvedModelId + ".");
+      await downloadFromHF();
+    }
+
     async function loadModel() {
       const payload = {
         model_id: document.getElementById("modelId").value || null,
@@ -1524,6 +2171,15 @@ UI_HTML = """<!doctype html>
       });
 
       if (resolved.local_expected && resolved.exists === false) {
+        setSettingsStatus({
+          status: "model_not_found",
+          error: "Configured local model path does not exist.",
+          model_id: resolved.model_id || null,
+          model_source: resolved.model_source || null,
+          model_path: resolved.model_path || null,
+          model_base_dir: resolved.model_base_dir || null,
+          next_step: "Pick a valid local path or download from Hugging Face.",
+        });
         pendingLoadPayload = payload;
         openDownloadModal(resolved);
         switchSettingsTab("download");
@@ -1531,7 +2187,29 @@ UI_HTML = """<!doctype html>
         return;
       }
 
-      await executeLoad(payload);
+      try {
+        await executeLoad(payload);
+      } catch (err) {
+        const statusCode = Number(err && err.status);
+        const modelIdForDownload = String(payload.model_id || document.getElementById("modelId").value || "").trim();
+        if (statusCode === 500 && modelIdForDownload) {
+          try {
+            await redirectToDownloadAndStart(modelIdForDownload, err);
+            return;
+          } catch (downloadErr) {
+            setSettingsStatus({
+              status: "auto_download_failed_after_load_500",
+              model_id: modelIdForDownload,
+              load_error: String(err),
+              download_error: String(downloadErr),
+            });
+            appendMessage("assistant", "Auto-download failed: " + String(downloadErr));
+            return;
+          }
+        }
+        setSettingsStatus({ status: "load_failed", error: String(err), status_code: statusCode || null });
+        appendMessage("assistant", "Model load failed: " + String(err));
+      }
     }
 
     async function downloadFromHF() {
@@ -1600,16 +2278,25 @@ UI_HTML = """<!doctype html>
       if (isGenerating) {
         return;
       }
-      const prompt = document.getElementById("prompt").value;
-      if (!prompt || !prompt.trim()) {
+      if (hasModelIssue) {
+        openModelIssueSettings();
+        setSettingsStatus({ status: "model_issue", detail: "Resolve model issue before sending prompts." });
         return;
       }
-      appendMessage("user", prompt);
+      const prompt = String(document.getElementById("prompt").value || "");
+      const trimmedPrompt = prompt.trim();
+      if (!trimmedPrompt) {
+        return;
+      }
+      const targetConversationId = activeConversationId;
+      savePromptSettings(false);
+      const modelPrompt = buildModelPrompt(trimmedPrompt);
+      appendMessage("user", trimmedPrompt, targetConversationId);
       document.getElementById("prompt").value = "";
-      appendMessage("assistant", "Generating...");
+      const assistantMessageId = appendMessage("assistant", "Generating...", targetConversationId);
       isGenerating = true;
       const payload = {
-        prompt: prompt,
+        prompt: modelPrompt,
         max_new_tokens: Number(document.getElementById("maxNewTokens").value || 64),
         do_sample: asBool(document.getElementById("doSample").value)
       };
@@ -1619,23 +2306,11 @@ UI_HTML = """<!doctype html>
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
-        const box = document.getElementById("messages");
-        const last = box.lastElementChild;
-        if (last && last.classList.contains("assistant") && last.textContent === "Generating...") {
-          last.textContent = data.generated_text || data.text || "";
-        } else {
-          appendMessage("assistant", data.generated_text || data.text || "");
-        }
+        updateMessageText(assistantMessageId, data.generated_text || data.text || "", targetConversationId);
         await refreshStatus();
       } catch (err) {
-        const box = document.getElementById("messages");
-        const last = box.lastElementChild;
         const errMsg = String(err);
-        if (last && last.classList.contains("assistant") && last.textContent === "Generating...") {
-          last.textContent = "Error: " + errMsg;
-        } else {
-          appendMessage("assistant", "Error: " + errMsg);
-        }
+        updateMessageText(assistantMessageId, "Error: " + errMsg, targetConversationId);
       } finally {
         isGenerating = false;
       }
@@ -1659,9 +2334,19 @@ UI_HTML = """<!doctype html>
     });
 
     initTheme();
+    loadConversationsState();
+    renderConversationList();
+    renderMessages();
+    loadPromptSettings();
+    document.getElementById("maxNewTokens").addEventListener("change", () => savePromptSettings(false));
+    document.getElementById("doSample").addEventListener("change", () => savePromptSettings(false));
+    document.getElementById("historyTurns").addEventListener("change", () => savePromptSettings(false));
+    document.getElementById("systemContext").addEventListener("change", () => savePromptSettings(false));
+    switchTab("chat");
     switchSettingsTab("config");
     initDownloadState();
     refreshStatus().catch((err) => setSettingsStatus({ error: String(err) }));
+    updateTopbarTitle();
   </script>
 </body>
 </html>

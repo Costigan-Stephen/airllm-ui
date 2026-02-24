@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import uuid
+from fnmatch import fnmatch
 from html import escape
 from pathlib import Path
 from typing import Optional
@@ -12,9 +13,8 @@ import uvicorn
 from dotenv import load_dotenv, set_key
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, hf_hub_download
 from pydantic import BaseModel, Field
-from tqdm.auto import tqdm as tqdm_auto
 
 from airllm import AutoModel
 
@@ -36,7 +36,8 @@ def _find_favicon():
     return None
 
 
-FAVICON_PATH = _find_favicon()
+def _current_favicon_path() -> Optional[Path]:
+    return _find_favicon()
 
 
 def _getenv(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -153,6 +154,7 @@ def _new_download_job(model_id: str, base_dir: str, target_dir: str):
             "progress": 0,
             "current": 0,
             "total": None,
+            "current_file": None,
             "logs": [f"Job created for {model_id}"],
             "error": None,
             "started_at": time.time(),
@@ -351,37 +353,57 @@ def _run_hf_download_job(job_id: str, payload: dict):
     _job_update(job_id, status="downloading")
     _job_log(job_id, f"Starting download for {model_id}")
     _job_log(job_id, f"Target directory: {target_dir}")
+    _job_update(job_id, progress=1, current=0, total=None, current_file="Resolving repository file list")
 
-    class JobTqdm(tqdm_auto):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            _job_update(job_id, total=self.total or None)
-            self._last_emit = 0.0
-
-        def update(self, n=1):
-            out = super().update(n)
-            now = time.time()
-            current = int(self.n or 0)
-            total = int(self.total) if self.total else None
-            progress = int((current / total) * 100) if total else 0
-            _job_update(job_id, current=current, total=total, progress=progress)
-            if now - self._last_emit > 0.5:
-                _job_log(job_id, f"Download progress: {current}/{total if total else '?'} files")
-                self._last_emit = now
-            return out
+    def _matches_any(path_value: str, patterns):
+        if not patterns:
+            return False
+        return any(fnmatch(path_value, pattern) for pattern in patterns)
 
     try:
         os.makedirs(base_dir, exist_ok=True)
         os.makedirs(target_dir, exist_ok=True)
-        snapshot_download(
-            repo_id=model_id,
-            revision=revision,
-            local_dir=target_dir,
-            token=HF_TOKEN,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            tqdm_class=JobTqdm,
-        )
+        api = HfApi(token=HF_TOKEN)
+        repo_files = list(api.list_repo_files(repo_id=model_id, revision=revision))
+        repo_files = [path_value for path_value in repo_files if not path_value.endswith("/")]
+
+        if allow_patterns:
+            repo_files = [path_value for path_value in repo_files if _matches_any(path_value, allow_patterns)]
+        if ignore_patterns:
+            repo_files = [path_value for path_value in repo_files if not _matches_any(path_value, ignore_patterns)]
+
+        total_files = len(repo_files)
+        if total_files == 0:
+            raise RuntimeError("No files matched the selected patterns for download.")
+
+        _job_update(job_id, total=total_files, current=0, progress=1)
+        _job_log(job_id, f"Resolved {total_files} files to download.")
+
+        done = 0
+        last_log = 0.0
+        for repo_file in repo_files:
+            progress = max(1, int((done / total_files) * 100))
+            _job_update(
+                job_id,
+                current=done,
+                total=total_files,
+                progress=progress,
+                current_file=repo_file,
+            )
+            hf_hub_download(
+                repo_id=model_id,
+                filename=repo_file,
+                revision=revision,
+                local_dir=target_dir,
+                token=HF_TOKEN,
+            )
+            done += 1
+            progress = int((done / total_files) * 100)
+            _job_update(job_id, current=done, total=total_files, progress=progress, current_file=repo_file)
+            now = time.time()
+            if now - last_log >= 0.5 or done == total_files:
+                _job_log(job_id, f"Download progress: {done}/{total_files} files")
+                last_log = now
     except Exception as exc:
         message = f"Hugging Face download failed: {exc}"
         _job_log(job_id, message)
@@ -533,7 +555,8 @@ UI_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AirLLM UI</title>
-  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="icon" href="/favicon?v=2">
+  <link rel="shortcut icon" href="/favicon.ico?v=2">
   <style>
     :root {
       --bg: #f5f7fb;
@@ -769,13 +792,33 @@ UI_HTML = """<!doctype html>
       color: var(--accent-text);
       border-color: var(--accent);
     }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
     .inline { display: inline-flex; align-items: center; gap: 8px; }
     .small { font-size: 12px; color: var(--muted); }
-    #settingsStatus { white-space: pre-wrap; background: #f9fafb; border: 1px solid var(--border); border-radius: 10px; padding: 10px; max-height: 220px; overflow: auto; }
+    #settingsStatus {
+      white-space: pre-wrap;
+      background: var(--panel-soft);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      display: block;
+      width: 100%;
+      max-height: 220px;
+      overflow: auto;
+    }
     .settings-tabs { display: flex; gap: 8px; margin-bottom: 12px; }
     .settings-tab-btn {
+      appearance: none;
+      -webkit-appearance: none;
       border: 1px solid var(--border);
       background: var(--panel);
+      color: var(--muted);
+      -webkit-text-fill-color: currentColor;
       border-radius: 8px;
       padding: 8px 12px;
       cursor: pointer;
@@ -783,10 +826,29 @@ UI_HTML = """<!doctype html>
       align-items: center;
       gap: 8px;
     }
+    .settings-tab-btn:hover {
+      border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+      color: var(--text);
+    }
     .settings-tab-btn.active {
       background: var(--accent);
       color: var(--accent-text);
       border-color: var(--accent);
+    }
+    [data-theme="dark"] .settings-tab-btn {
+      background: var(--panel) !important;
+      color: var(--muted) !important;
+      border-color: var(--border) !important;
+    }
+    [data-theme="dark"] .settings-tab-btn.active {
+      background: var(--accent) !important;
+      color: var(--accent-text) !important;
+      border-color: var(--accent) !important;
+    }
+    [data-theme="dark"] #settingsStatus {
+      background: var(--panel-soft) !important;
+      color: var(--text) !important;
+      border-color: var(--border) !important;
     }
     .settings-subpanel { display: none; }
     .settings-subpanel.active { display: block; }
@@ -980,7 +1042,7 @@ UI_HTML = """<!doctype html>
                 <span class="small">Set downloaded model as active AIRLLM_MODEL_PATH</span>
               </div>
               <div style="display:flex; gap:8px; margin-top:12px;">
-                <button class="btn primary" onclick="downloadFromHF()">Download from Hugging Face</button>
+                <button id="hfDownloadBtn" class="btn primary" onclick="downloadFromHF()">Download from Hugging Face</button>
               </div>
               <div class="small" style="margin-top:8px;">Downloads are saved under the current base directory.</div>
             </div>
@@ -1032,7 +1094,7 @@ UI_HTML = """<!doctype html>
 
       <div class="modal-actions">
         <button class="btn" onclick="closeDownloadModal()">Cancel</button>
-        <button class="btn primary" onclick="downloadFromHFModal()">Download</button>
+        <button id="modalDownloadBtn" class="btn primary" onclick="downloadFromHFModal()">Download</button>
       </div>
     </div>
   </div>
@@ -1060,14 +1122,27 @@ UI_HTML = """<!doctype html>
       badge.classList.toggle("hidden", !active);
     }
 
+    function setDownloadUiBusy(active) {
+      const hfButton = document.getElementById("hfDownloadBtn");
+      const modalButton = document.getElementById("modalDownloadBtn");
+      if (hfButton) {
+        hfButton.disabled = !!active;
+      }
+      if (modalButton) {
+        modalButton.disabled = !!active;
+      }
+    }
+
     function applyTheme(theme) {
       currentTheme = theme === "dark" ? "dark" : "light";
       document.documentElement.setAttribute("data-theme", currentTheme);
+      document.body.setAttribute("data-theme", currentTheme);
       localStorage.setItem("airllm_theme", currentTheme);
       const toggle = document.getElementById("themeToggle");
       if (toggle) {
         toggle.textContent = currentTheme === "dark" ? "Light" : "Dark";
       }
+      applySettingsThemeFixes();
     }
 
     function toggleTheme() {
@@ -1090,6 +1165,49 @@ UI_HTML = """<!doctype html>
       document.getElementById("settingsDownloadPanel").classList.toggle("active", !isConfig);
       document.getElementById("settingsTabConfigBtn").classList.toggle("active", isConfig);
       document.getElementById("settingsTabDownloadBtn").classList.toggle("active", !isConfig);
+      applySettingsThemeFixes();
+    }
+
+    function applySettingsThemeFixes() {
+      const palette = currentTheme === "dark"
+        ? {
+            text: "#e5e7eb",
+            muted: "#9ca3af",
+            accent: "#2563eb",
+            accentText: "#f8fafc",
+            border: "#1f2937",
+            panel: "#111827",
+            panelSoft: "#0f172a",
+          }
+        : {
+            text: "#0f172a",
+            muted: "#64748b",
+            accent: "#0f172a",
+            accentText: "#ffffff",
+            border: "#e2e8f0",
+            panel: "#ffffff",
+            panelSoft: "#f8fafc",
+          };
+
+      const status = document.getElementById("settingsStatus");
+      if (status) {
+        status.style.background = palette.panelSoft;
+        status.style.color = palette.text;
+        status.style.border = "1px solid " + palette.border;
+      }
+
+      const tabButtons = [
+        document.getElementById("settingsTabConfigBtn"),
+        document.getElementById("settingsTabDownloadBtn"),
+      ];
+      for (const btn of tabButtons) {
+        if (!btn) continue;
+        const isActive = btn.classList.contains("active");
+        btn.style.background = isActive ? palette.accent : palette.panel;
+        btn.style.color = isActive ? palette.accentText : palette.muted;
+        btn.style.webkitTextFillColor = isActive ? palette.accentText : palette.muted;
+        btn.style.border = "1px solid " + (isActive ? palette.accent : palette.border);
+      }
     }
 
     function modelDisplayName(data) {
@@ -1102,6 +1220,7 @@ UI_HTML = """<!doctype html>
 
     function setSettingsStatus(obj) {
       document.getElementById("settingsStatus").textContent = JSON.stringify(obj, null, 2);
+      applySettingsThemeFixes();
     }
 
     function appendMessage(role, text) {
@@ -1163,10 +1282,13 @@ UI_HTML = """<!doctype html>
       document.getElementById("downloadProgressText").textContent =
         (job.status || "unknown") + " - " + pct + "% (" + (job.current || 0) + "/" + (job.total || "?") + ")";
       document.getElementById("downloadJobMeta").textContent =
-        "Job: " + (job.job_id || "-") + " | Model: " + (job.model_id || "-") + " | Target: " + (job.target_dir || "-");
+        "Job: " + (job.job_id || "-") + " | Model: " + (job.model_id || "-") + " | Target: " + (job.target_dir || "-") +
+        (job.current_file ? " | File: " + job.current_file : "");
       const logs = job.logs || [];
       document.getElementById("downloadLogBox").textContent = logs.length ? logs.join("\\n") : "No logs yet.";
-      setDownloadTabIndicator(job.status === "queued" || job.status === "downloading");
+      const active = job.status === "queued" || job.status === "downloading";
+      setDownloadTabIndicator(active);
+      setDownloadUiBusy(active);
     }
 
     function stopDownloadPolling() {
@@ -1177,6 +1299,7 @@ UI_HTML = """<!doctype html>
       activeDownloadJobId = null;
       localStorage.removeItem("airllm_download_job_id");
       setDownloadTabIndicator(false);
+      setDownloadUiBusy(false);
     }
 
     async function pollDownloadJob(jobId, options = {}) {
@@ -1186,6 +1309,7 @@ UI_HTML = """<!doctype html>
       activeDownloadJobId = jobId;
       localStorage.setItem("airllm_download_job_id", jobId);
       setDownloadTabIndicator(true);
+      setDownloadUiBusy(true);
 
       async function tick() {
         if (!activeDownloadJobId) return;
@@ -1225,6 +1349,48 @@ UI_HTML = """<!doctype html>
             setSettingsStatus({ error: String(err) });
           });
         }, 1000);
+      }
+    }
+
+    async function resumeActiveDownloadFromServer() {
+      const active = await apiJson("/hf/download/active");
+      if (active && active.job_id) {
+        await pollDownloadJob(active.job_id);
+        return true;
+      }
+      return false;
+    }
+
+    async function initDownloadState() {
+      setDownloadProgress({
+        job_id: "-",
+        model_id: "-",
+        target_dir: "-",
+        status: "idle",
+        progress: 0,
+        current: 0,
+        total: null,
+        logs: ["No active downloads."],
+      });
+
+      const resumeJobId = localStorage.getItem("airllm_download_job_id");
+      if (resumeJobId) {
+        try {
+          await pollDownloadJob(resumeJobId);
+          return;
+        } catch (err) {
+          localStorage.removeItem("airllm_download_job_id");
+          const message = String(err || "");
+          if (!message.includes("No download job found")) {
+            setSettingsStatus({ error: message });
+          }
+        }
+      }
+
+      try {
+        await resumeActiveDownloadFromServer();
+      } catch (err) {
+        setSettingsStatus({ error: String(err) });
       }
     }
 
@@ -1369,6 +1535,10 @@ UI_HTML = """<!doctype html>
     }
 
     async function downloadFromHF() {
+      if (activeDownloadJobId) {
+        setSettingsStatus({ status: "download_in_progress", job_id: activeDownloadJobId });
+        return;
+      }
       const modelId = document.getElementById("hfModelId").value || document.getElementById("modelId").value;
       const payload = {
         model_id: modelId || null,
@@ -1399,6 +1569,10 @@ UI_HTML = """<!doctype html>
     }
 
     async function downloadFromHFModal() {
+      if (activeDownloadJobId) {
+        setSettingsStatus({ status: "download_in_progress", job_id: activeDownloadJobId });
+        return;
+      }
       const setActive = document.getElementById("modalHfSetActive").checked;
       const payload = {
         model_id: document.getElementById("modalHfModelId").value || document.getElementById("modelId").value || null,
@@ -1486,11 +1660,7 @@ UI_HTML = """<!doctype html>
 
     initTheme();
     switchSettingsTab("config");
-    setDownloadProgress({ job_id: "-", model_id: "-", target_dir: "-", status: "idle", progress: 0, current: 0, total: null, logs: ["No active downloads."] });
-    const resumeJobId = localStorage.getItem("airllm_download_job_id");
-    if (resumeJobId) {
-      pollDownloadJob(resumeJobId).catch((err) => setSettingsStatus({ error: String(err) }));
-    }
+    initDownloadState();
     refreshStatus().catch((err) => setSettingsStatus({ error: String(err) }));
   </script>
 </body>
@@ -1508,13 +1678,29 @@ def ui():
         .replace("__MODEL_BASE_DIR_VALUE__", escape(state.get("model_base_dir") or ""))
         .replace("__DEVICE_VALUE__", escape(state.get("device") or ""))
     )
-    return HTMLResponse(html)
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
-    if FAVICON_PATH and FAVICON_PATH.exists():
-        return FileResponse(FAVICON_PATH)
+    favicon_path = _current_favicon_path()
+    if favicon_path and favicon_path.exists():
+        return FileResponse(favicon_path, headers={"Cache-Control": "no-cache"})
+    raise HTTPException(status_code=404, detail="favicon not found")
+
+
+@app.get("/favicon", include_in_schema=False)
+def favicon_any():
+    favicon_path = _current_favicon_path()
+    if favicon_path and favicon_path.exists():
+        return FileResponse(favicon_path, headers={"Cache-Control": "no-cache"})
     raise HTTPException(status_code=404, detail="favicon not found")
 
 
@@ -1661,6 +1847,23 @@ def hf_download(request: HFDownloadRequest):
         "persist_env": request.persist_env,
         "env_file": str(ENV_FILE),
     }
+
+
+@app.get("/hf/download/active")
+def hf_download_active():
+    with _download_lock:
+        active = [job for job in _download_jobs.values() if job.get("status") in ("queued", "downloading")]
+        if not active:
+            return {"job_id": None, "status": "idle"}
+        active.sort(key=lambda job: job.get("started_at", 0), reverse=True)
+        job = active[0]
+        return {
+            "job_id": job.get("job_id"),
+            "status": job.get("status"),
+            "model_id": job.get("model_id"),
+            "target_dir": job.get("target_dir"),
+            "started_at": job.get("started_at"),
+        }
 
 
 @app.get("/hf/download/{job_id}")

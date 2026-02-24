@@ -15,7 +15,12 @@ from transformers.quantizers import AutoHfQuantizer, HfQuantizer
 
 from .profiler import LayeredProfiler
 
-from optimum.bettertransformer import BetterTransformer
+try:
+    from optimum.bettertransformer import BetterTransformer
+    bettertransformer_installed = True
+except ImportError:
+    BetterTransformer = None
+    bettertransformer_installed = False
 
 from .utils import clean_memory, load_layer, \
     find_or_create_local_splitted_path
@@ -185,14 +190,17 @@ class AirLLMBaseModel(GenerationMixin):
         self.model = None
 
         if self.get_use_better_transformer():
-            try:
-                with init_empty_weights():
-                    self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True)
-                    self.model = BetterTransformer.transform(self.model)  # enable flash attention
-            except ValueError as ve:
-                del self.model
-                clean_memory()
-                self.model = None
+            if bettertransformer_installed:
+                try:
+                    with init_empty_weights():
+                        self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True)
+                        self.model = BetterTransformer.transform(self.model)  # enable flash attention
+                except ValueError as ve:
+                    del self.model
+                    clean_memory()
+                    self.model = None
+            else:
+                print("optimum.bettertransformer not available, fallback to standard attention path.")
 
             if self.model is None:
                 # try way 2.

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import sys
@@ -6,10 +7,20 @@ import threading
 import time
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from typing import Optional
 
 import torch
 from dotenv import set_key
+
+# Always prioritize the local bundled air_llm package so runtime behavior
+# matches repository code changes and does not depend on stale site-packages.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_LOCAL_AIR_LLM_ROOT = _PROJECT_ROOT / "air_llm"
+if _LOCAL_AIR_LLM_ROOT.exists():
+    local_pkg_path = str(_LOCAL_AIR_LLM_ROOT)
+    if local_pkg_path not in sys.path:
+        sys.path.insert(0, local_pkg_path)
 
 from airllm import AutoModel
 
@@ -73,6 +84,23 @@ def resolve_model_source(
     if model_base_dir:
         return os.path.join(model_base_dir, *model_id.split("/"))
     return model_id
+
+
+def _looks_like_local_path(value: Optional[str]) -> bool:
+    value = normalize_optional(value)
+    if not value:
+        return False
+    if re.match(r"^[a-zA-Z]:[\\/]", value):
+        return True
+    if value.startswith(("\\\\", "./", ".\\", "../", "..\\", "/", "~")):
+        return True
+    if "\\" in value:
+        return True
+    return os.path.isabs(os.path.expanduser(value))
+
+
+def looks_like_local_path(value: Optional[str]) -> bool:
+    return _looks_like_local_path(value)
 
 
 def get_runtime_field(key: str):
@@ -176,6 +204,83 @@ def _cleanup_model():
         torch.cuda.empty_cache()
 
 
+def _write_json(path: Path, payload: dict):
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _build_safetensors_index(local_dir: Path) -> Optional[Path]:
+    safetensor_files = sorted(local_dir.glob("*.safetensors"))
+    if not safetensor_files:
+        return None
+
+    try:
+        from safetensors import safe_open
+    except Exception:
+        return None
+
+    weight_map = {}
+    total_size = 0
+    for file_path in safetensor_files:
+        total_size += file_path.stat().st_size
+        with safe_open(str(file_path), framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                weight_map[key] = file_path.name
+
+    if not weight_map:
+        return None
+
+    index_path = local_dir / "model.safetensors.index.json"
+    _write_json(index_path, {"metadata": {"total_size": total_size}, "weight_map": weight_map})
+    return index_path
+
+
+def _build_pytorch_bin_index(local_dir: Path) -> Optional[Path]:
+    bin_path = local_dir / "pytorch_model.bin"
+    if not bin_path.exists() or not bin_path.is_file():
+        return None
+
+    try:
+        state_dict = torch.load(str(bin_path), map_location="cpu", weights_only=True)
+    except TypeError:
+        state_dict = torch.load(str(bin_path), map_location="cpu")
+    except Exception:
+        return None
+
+    if isinstance(state_dict, dict) and "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
+        state_dict = state_dict["state_dict"]
+
+    if not isinstance(state_dict, dict) or not state_dict:
+        return None
+
+    weight_map = {str(key): "pytorch_model.bin" for key in state_dict.keys()}
+    index_path = local_dir / "pytorch_model.bin.index.json"
+    _write_json(index_path, {"metadata": {"total_size": bin_path.stat().st_size}, "weight_map": weight_map})
+    return index_path
+
+
+def _ensure_airllm_index_files(local_source: str):
+    local_dir = Path(local_source)
+    if not local_dir.is_dir():
+        return
+
+    has_index = (
+        (local_dir / "model.safetensors.index.json").exists()
+        or (local_dir / "pytorch_model.bin.index.json").exists()
+    )
+    if has_index:
+        return
+
+    generated = _build_safetensors_index(local_dir)
+    if generated is not None:
+        print(f"Generated {generated.name} for local model loading.")
+        return
+
+    generated = _build_pytorch_bin_index(local_dir)
+    if generated is not None:
+        print(f"Generated {generated.name} for local model loading.")
+        return
+
+
 def load_model(
     model_id: Optional[str] = None,
     model_path: Optional[str] = None,
@@ -218,17 +323,28 @@ def load_model(
         kwargs = {"device": target_device}
         if HF_TOKEN:
             kwargs["hf_token"] = HF_TOKEN
-        if os.path.exists(target_model_source):
-            validate_local_model_source(target_model_source)
+        local_expected = bool(
+            target_model_path
+            or target_model_base_dir
+            or _looks_like_local_path(target_model_source)
+        )
+        source_for_load = target_model_source
+        if local_expected:
+            local_source = os.path.expanduser(target_model_source)
+            if not os.path.exists(local_source):
+                raise FileNotFoundError(f"Local model path does not exist: {target_model_source}")
+            _ensure_airllm_index_files(local_source)
+            validate_local_model_source(local_source)
+            source_for_load = local_source
 
-        _model = AutoModel.from_pretrained(target_model_source, **kwargs)
+        _model = AutoModel.from_pretrained(source_for_load, **kwargs)
         _runtime.update(
             {
                 "model_id": target_model_id,
                 "model_path": target_model_path,
                 "model_base_dir": target_model_base_dir,
                 "device": target_device,
-                "model_source": target_model_source,
+                "model_source": source_for_load,
             }
         )
 
@@ -521,3 +637,4 @@ def start_load_job(payload: dict):
     thread = threading.Thread(target=_run_load_job, args=(job_id, payload), daemon=True)
     thread.start()
     return job_id
+

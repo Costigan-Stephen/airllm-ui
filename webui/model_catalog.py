@@ -7,9 +7,14 @@ def inspect_local_model_dir(root_path: Path, files, exhaustive: bool = False):
     file_set = set(files)
     has_gguf = any(name.lower().endswith(".gguf") for name in files)
     has_config = "config.json" in file_set
+    has_airllm_index = (
+        "pytorch_model.bin.index.json" in file_set
+        or "model.safetensors.index.json" in file_set
+    )
     has_weights = (
         "pytorch_model.bin" in file_set
         or "pytorch_model.bin.index.json" in file_set
+        or "model.safetensors.index.json" in file_set
         or any(name.endswith(".safetensors") for name in files)
     )
 
@@ -31,6 +36,12 @@ def inspect_local_model_dir(root_path: Path, files, exhaustive: bool = False):
         return False, "config.json exists but has no model_type."
     if has_config and model_type and not has_weights:
         return False, f"model_type={model_type} but no PyTorch/safetensors weights found."
+    if has_config and model_type and has_weights and not has_airllm_index:
+        return (
+            False,
+            "AirLLM requires a sharded checkpoint index file "
+            "(model.safetensors.index.json or pytorch_model.bin.index.json).",
+        )
     if has_config and model_type and has_weights:
         return True, f"model_type={model_type}"
     if exhaustive:
@@ -59,6 +70,10 @@ def validate_local_model_source(model_source: str):
     if reason and "no model_type" in reason:
         raise ValueError(
             f"Selected model path is not loadable by Transformers: {model_source} ({reason})"
+        )
+    if reason and "sharded checkpoint index file" in reason:
+        raise ValueError(
+            f"Selected local model path is missing AirLLM-required index files: {model_source} ({reason})"
         )
     if reason:
         raise ValueError(
@@ -124,4 +139,3 @@ def list_candidate_directories(base_dir: str, max_depth: int = 2, limit: int = 3
 
     directories.sort(key=lambda item: item["label"].lower())
     return directories
-

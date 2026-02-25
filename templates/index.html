@@ -95,6 +95,15 @@
       color: var(--accent-text);
       border-color: var(--accent);
     }
+    .tab-badge {
+      margin-left: 6px;
+      font-size: 10px;
+      border-radius: 999px;
+      background: #dc2626;
+      color: #ffffff;
+      padding: 1px 6px;
+      font-weight: 700;
+    }
     .conversation-card {
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -297,9 +306,20 @@
     }
     .chat-layout {
       display: grid;
-      grid-template-rows: 1fr auto;
+      grid-template-rows: auto 1fr auto;
       height: calc(100vh - 88px);
       gap: 12px;
+    }
+    .chat-tools {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 8px;
+    }
+    .chat-tools .icon-btn-sm {
+      min-width: 30px;
+      width: 30px;
+      height: 30px;
     }
     #messages {
       background: color-mix(in srgb, var(--panel-soft) 65%, var(--panel));
@@ -369,6 +389,47 @@
     }
     .card h3 { margin: 0 0 8px; font-size: 15px; }
     .label { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 10px; display: block; }
+    .notifications-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .notifications-list {
+      display: grid;
+      gap: 8px;
+      max-height: calc(100vh - 220px);
+      overflow: auto;
+    }
+    .notification-item {
+      border: 1px solid var(--border);
+      background: var(--panel-soft);
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .notification-item.info {
+      border-left: 3px solid #3b82f6;
+    }
+    .notification-item.success {
+      border-left: 3px solid #16a34a;
+    }
+    .notification-item.warning {
+      border-left: 3px solid #d97706;
+    }
+    .notification-item.error {
+      border-left: 3px solid #dc2626;
+    }
+    .notification-title {
+      font-size: 13px;
+      color: var(--text);
+      white-space: pre-wrap;
+    }
+    .notification-meta {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+    }
     .btn {
       border: 1px solid var(--border);
       background: var(--panel);
@@ -536,6 +597,7 @@
       <div class="brand">AirLLM UI</div>
       <div class="sidebar-nav">
         <button id="tabChatBtn" class="tab-btn active" onclick="switchTab('chat')">Chat</button>
+        <button id="tabNotificationsBtn" class="tab-btn" onclick="switchTab('notifications')">Notifications <span id="notificationsBadge" class="tab-badge hidden">0</span></button>
         <button id="tabSettingsBtn" class="tab-btn" onclick="switchTab('settings')">Settings</button>
       </div>
       <div id="conversationSection" class="conversation-card">
@@ -564,6 +626,11 @@
       <div class="content">
         <section id="chatPanel" class="panel active">
           <div class="chat-layout">
+            <div class="chat-tools">
+              <button id="chatClearBtn" class="icon-btn-sm delete" onclick="clearActiveConversation()" title="Clear current chat" aria-label="Clear current chat">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M10 2h4a2 2 0 0 1 2 2v1h4a1 1 0 1 1 0 2h-1v12a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V7H4a1 1 0 1 1 0-2h4V4a2 2 0 0 1 2-2zm4 3V4h-4v1h4zm-7 2v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7H7zm3 3a1 1 0 0 1 1 1v6a1 1 0 1 1-2 0v-6a1 1 0 0 1 1-1zm4 0a1 1 0 0 1 1 1v6a1 1 0 1 1-2 0v-6a1 1 0 0 1 1-1z"/></svg>
+              </button>
+            </div>
             <div id="messages">
               <div class="message assistant">AirLLM is ready. Open Settings to choose model source, then send a prompt.</div>
             </div>
@@ -571,9 +638,20 @@
               <div id="activeConversationLabel" class="small">Conversation: -</div>
               <textarea id="prompt" placeholder="Type a message. Enter to send, Shift+Enter for a new line."></textarea>
               <div class="chat-composer-actions">
-                <span id="chatInputHint" class="small" style="margin-right:auto; align-self:center;">Press Enter to send</span>
                 <button id="chatSendBtn" class="btn primary" onclick="sendPrompt()">Send</button>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="notificationsPanel" class="panel">
+          <div class="card">
+            <div class="notifications-head">
+              <h3>Notifications</h3>
+              <button class="btn xs" onclick="clearNotifications()">Clear</button>
+            </div>
+            <div id="notificationsList" class="notifications-list">
+              <div class="conversation-empty">No notifications yet.</div>
             </div>
           </div>
         </section>
@@ -763,9 +841,11 @@
     const CONVERSATION_STORAGE_KEY = "airllm_conversations_v1";
     const ACTIVE_CONVERSATION_STORAGE_KEY = "airllm_active_conversation_v1";
     const PROMPT_SETTINGS_STORAGE_KEY = "airllm_prompt_settings_v1";
+    const NOTIFICATION_STORAGE_KEY = "airllm_notifications_v1";
     let conversations = [];
     let activeConversationId = null;
     let editingConversationId = null;
+    let notifications = [];
 
     function newId(prefix) {
       return prefix + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
@@ -791,8 +871,20 @@
     }
 
     function saveConversationsState() {
-      localStorage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(conversations));
-      localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId || "");
+      try {
+        localStorage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(conversations));
+        localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId || "");
+      } catch (err) {
+        console.warn("Unable to persist conversations:", err);
+      }
+    }
+
+    function saveNotificationsState() {
+      try {
+        localStorage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(notifications));
+      } catch (err) {
+        console.warn("Unable to persist notifications:", err);
+      }
     }
 
     function loadConversationsState() {
@@ -835,12 +927,37 @@
       saveConversationsState();
     }
 
+    function loadNotificationsState() {
+      let parsed = [];
+      try {
+        parsed = JSON.parse(localStorage.getItem(NOTIFICATION_STORAGE_KEY) || "[]");
+      } catch (_) {
+        parsed = [];
+      }
+      if (!Array.isArray(parsed)) {
+        parsed = [];
+      }
+      notifications = parsed
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          id: item.id || newId("note"),
+          level: ["info", "success", "warning", "error"].includes(item.level) ? item.level : "info",
+          text: String(item.text || ""),
+          created_at: Number(item.created_at || Date.now()),
+        }))
+        .slice(-200);
+      saveNotificationsState();
+    }
+
     function updateTopbarTitle() {
       const isChat = document.getElementById("chatPanel").classList.contains("active");
+      const isNotifications = document.getElementById("notificationsPanel").classList.contains("active");
       if (isChat) {
         const conv = getActiveConversation();
         document.getElementById("topbarTitle").textContent = conv ? conv.title : "Chat";
         document.getElementById("activeConversationLabel").textContent = "Conversation: " + (conv ? conv.title : "-");
+      } else if (isNotifications) {
+        document.getElementById("topbarTitle").textContent = "Notifications";
       } else {
         document.getElementById("topbarTitle").textContent = "Settings";
       }
@@ -969,6 +1086,63 @@
       box.scrollTop = box.scrollHeight;
     }
 
+    function renderNotifications() {
+      const list = document.getElementById("notificationsList");
+      const badge = document.getElementById("notificationsBadge");
+      if (!list || !badge) return;
+
+      list.innerHTML = "";
+      if (!notifications.length) {
+        list.innerHTML = '<div class="conversation-empty">No notifications yet.</div>';
+        badge.classList.add("hidden");
+        return;
+      }
+
+      const recent = notifications.slice().reverse();
+      for (const note of recent) {
+        const item = document.createElement("div");
+        item.className = "notification-item " + (note.level || "info");
+
+        const title = document.createElement("div");
+        title.className = "notification-title";
+        title.textContent = note.text || "";
+
+        const meta = document.createElement("div");
+        meta.className = "notification-meta";
+        const time = new Date(note.created_at || Date.now()).toLocaleString();
+        meta.textContent = (note.level || "info").toUpperCase() + " • " + time;
+
+        item.appendChild(title);
+        item.appendChild(meta);
+        list.appendChild(item);
+      }
+
+      badge.textContent = String(notifications.length);
+      badge.classList.toggle("hidden", notifications.length === 0);
+    }
+
+    function pushNotification(text, level = "info") {
+      const safeLevel = ["info", "success", "warning", "error"].includes(level) ? level : "info";
+      notifications.push({
+        id: newId("note"),
+        level: safeLevel,
+        text: String(text || ""),
+        created_at: Date.now(),
+      });
+      if (notifications.length > 200) {
+        notifications = notifications.slice(-200);
+      }
+      saveNotificationsState();
+      renderNotifications();
+    }
+
+    function clearNotifications() {
+      if (!notifications.length) return;
+      notifications = [];
+      saveNotificationsState();
+      renderNotifications();
+    }
+
     function selectConversation(conversationId) {
       if (!conversations.some((item) => item.id === conversationId)) return;
       editingConversationId = null;
@@ -976,18 +1150,33 @@
       saveConversationsState();
       renderConversationList();
       renderMessages();
+      switchTab("chat");
       updateTopbarTitle();
     }
 
     function newConversation() {
-      const title = prompt("Conversation name", defaultConversationTitle());
-      if (title === null) return;
-      const conv = createConversationObject(title.trim() || defaultConversationTitle());
+      const conv = createConversationObject(defaultConversationTitle());
       conversations.unshift(conv);
       activeConversationId = conv.id;
       saveConversationsState();
       renderConversationList();
       renderMessages();
+      switchTab("chat");
+      updateTopbarTitle();
+    }
+
+    function clearActiveConversation() {
+      const conv = getActiveConversation();
+      if (!conv) return;
+      if (!Array.isArray(conv.messages) || conv.messages.length === 0) {
+        return;
+      }
+      conv.messages = [];
+      conv.updated_at = Date.now();
+      saveConversationsState();
+      renderMessages();
+      renderConversationList();
+      switchTab("chat");
       updateTopbarTitle();
     }
 
@@ -1023,7 +1212,6 @@
     function deleteConversation(conversationId) {
       const conv = conversations.find((item) => item.id === conversationId);
       if (!conv) return;
-      if (!confirm('Delete conversation "' + (conv.title || "Chat") + '"?')) return;
       editingConversationId = null;
       conversations = conversations.filter((item) => item.id !== conv.id);
       if (!conversations.length) {
@@ -1128,10 +1316,14 @@
 
     function switchTab(tab) {
       const isChat = tab === "chat";
+      const isNotifications = tab === "notifications";
+      const isSettings = tab === "settings";
       document.getElementById("chatPanel").classList.toggle("active", isChat);
-      document.getElementById("settingsPanel").classList.toggle("active", !isChat);
+      document.getElementById("notificationsPanel").classList.toggle("active", isNotifications);
+      document.getElementById("settingsPanel").classList.toggle("active", isSettings);
       document.getElementById("tabChatBtn").classList.toggle("active", isChat);
-      document.getElementById("tabSettingsBtn").classList.toggle("active", !isChat);
+      document.getElementById("tabNotificationsBtn").classList.toggle("active", isNotifications);
+      document.getElementById("tabSettingsBtn").classList.toggle("active", isSettings);
       updateTopbarTitle();
     }
 
@@ -1468,7 +1660,7 @@
         if (data.status === "failed") {
           stopDownloadPolling();
           setSettingsStatus(data);
-          appendMessage("assistant", "Download failed: " + (data.error || "unknown error"));
+          pushNotification("Download failed: " + (data.error || "unknown error"), "error");
           if (closeModalOnComplete) {
             closeDownloadModal();
           }
@@ -1477,16 +1669,52 @@
         if (data.status === "completed") {
           stopDownloadPolling();
           setSettingsStatus(data);
-          appendMessage("assistant", "Download completed: " + (data.model_id || ""));
-          await refreshStatus();
+          pushNotification("Download completed: " + (data.model_id || ""), "success");
+          if (data.model_id) {
+            document.getElementById("modelId").value = data.model_id;
+            document.getElementById("hfModelId").value = data.model_id;
+          }
+          if (data.target_dir) {
+            document.getElementById("modelPath").value = data.target_dir;
+          }
+          if (data.base_dir) {
+            document.getElementById("modelBaseDir").value = data.base_dir;
+          }
+
+          switchTab("settings");
+          switchSettingsTab("config");
+
+          const health = await refreshStatus();
           await refreshModels(document.getElementById("modelPath").value || "", true);
           if (closeModalOnComplete) {
             closeDownloadModal(false);
           }
+
           if (triggerPendingLoad && pendingLoadPayload) {
             const payload = pendingLoadPayload;
             pendingLoadPayload = null;
             await executeLoadWithProgress(payload, "Download complete. Loading downloaded model.");
+          } else if (!(health && health.model_loaded)) {
+            const autoLoadPayload = {
+              model_id: document.getElementById("modelId").value || null,
+              model_path: document.getElementById("modelPath").value || null,
+              model_base_dir: document.getElementById("modelBaseDir").value || null,
+              device: document.getElementById("device").value || null,
+              force_reload: true,
+              persist_env: document.getElementById("persistEnv").checked
+            };
+            try {
+              await executeLoadWithProgress(autoLoadPayload, "Download complete. Loading model automatically.");
+            } catch (loadErr) {
+              setSettingsStatus({
+                status: "post_download_autoload_failed",
+                error: String(loadErr),
+                download_job: data.job_id || null,
+                model_id: data.model_id || autoLoadPayload.model_id || null,
+                model_path: autoLoadPayload.model_path || null
+              });
+              pushNotification("Download finished, but automatic model load failed: " + String(loadErr), "error");
+            }
           }
         }
       }
@@ -1629,6 +1857,7 @@
         document.getElementById("hfModelId").value = data.model_id || "";
       }
       await refreshModels(data.model_path || "", true);
+      return data;
     }
 
     async function saveSettings() {
@@ -1681,7 +1910,7 @@
           finishModelLoadProgress(true, job.message || "Model is ready.");
           setSettingsStatus(job.result || job);
           const result = job.result || {};
-          appendMessage("assistant", "Model loaded: " + (result.model_source || result.model_id || "configured source"));
+          pushNotification("Model loaded: " + (result.model_source || result.model_id || "configured source"), "success");
           await refreshStatus();
           return result;
         }
@@ -1751,7 +1980,7 @@
         model_id: resolvedModelId,
         cause: String(cause || "load failed"),
       });
-      appendMessage("assistant", "Load failed (500). Starting Hugging Face download for " + resolvedModelId + ".");
+      pushNotification("Load failed (500). Starting Hugging Face download for " + resolvedModelId + ".", "warning");
       await downloadFromHF();
     }
 
@@ -1804,12 +2033,12 @@
               load_error: String(err),
               download_error: String(downloadErr),
             });
-            appendMessage("assistant", "Auto-download failed: " + String(downloadErr));
+            pushNotification("Auto-download failed: " + String(downloadErr), "error");
             return;
           }
         }
         setSettingsStatus({ status: "load_failed", error: String(err), status_code: statusCode || null });
-        appendMessage("assistant", "Model load failed: " + String(err));
+        pushNotification("Model load failed: " + String(err), "error");
       }
     }
 
@@ -1835,7 +2064,7 @@
         body: JSON.stringify(payload)
       });
       setSettingsStatus(data);
-      appendMessage("assistant", "Download queued: " + (data.downloaded_model_id || modelId));
+      pushNotification("Download queued: " + (data.downloaded_model_id || modelId), "info");
       if (data.downloaded_model_id) {
         document.getElementById("modelId").value = data.downloaded_model_id;
       }
@@ -1869,7 +2098,7 @@
         body: JSON.stringify(payload)
       });
       setSettingsStatus(data);
-      appendMessage("assistant", "Download queued: " + (data.downloaded_model_id || payload.model_id));
+      pushNotification("Download queued: " + (data.downloaded_model_id || payload.model_id), "info");
       if (data.job_id) {
         await pollDownloadJob(data.job_id, { closeModalOnComplete: true, triggerPendingLoad: setActive });
       }
@@ -1936,8 +2165,10 @@
 
     initTheme();
     loadConversationsState();
+    loadNotificationsState();
     renderConversationList();
     renderMessages();
+    renderNotifications();
     loadPromptSettings();
     document.getElementById("maxNewTokens").addEventListener("change", () => savePromptSettings(false));
     document.getElementById("doSample").addEventListener("change", () => savePromptSettings(false));
@@ -1952,4 +2183,8 @@
   </script>
 </body>
 </html>
+
+
+
+
 

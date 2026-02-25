@@ -475,6 +475,9 @@
       background: #0f766e;
       transition: width 0.2s ease;
     }
+    .progress-bar.model-load {
+      background: #2563eb;
+    }
     .log-box {
       margin-top: 8px;
       max-height: 180px;
@@ -619,7 +622,12 @@
               </div>
               <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn" onclick="saveSettings()">Save Settings</button>
-                <button class="btn primary" onclick="loadModel()">Load / Reload Model</button>
+                <button id="loadModelBtn" class="btn primary" onclick="loadModel()">Load / Reload Model</button>
+              </div>
+              <div id="modelLoadProgressWrap" class="hidden" style="margin-top:10px;">
+                <div id="modelLoadProgressMeta" class="small">Preparing model load...</div>
+                <div class="progress-wrap"><div id="modelLoadProgressBar" class="progress-bar model-load"></div></div>
+                <div id="modelLoadProgressText" class="small" style="margin-top:6px;">0%</div>
               </div>
             </div>
           </div>
@@ -749,6 +757,9 @@
     let downloadPollTimer = null;
     let pendingLoadPayload = null;
     let hasModelIssue = false;
+    let isModelLoading = false;
+    let activeModelLoadJobId = null;
+    let modelLoadProgress = 0;
     const CONVERSATION_STORAGE_KEY = "airllm_conversations_v1";
     const ACTIVE_CONVERSATION_STORAGE_KEY = "airllm_active_conversation_v1";
     const PROMPT_SETTINGS_STORAGE_KEY = "airllm_prompt_settings_v1";
@@ -1141,6 +1152,63 @@
       }
     }
 
+    function setModelLoadUiBusy(active) {
+      const loadButton = document.getElementById("loadModelBtn");
+      if (loadButton) {
+        loadButton.disabled = !!active;
+        loadButton.textContent = active ? "Loading Model..." : "Load / Reload Model";
+      }
+      if (active) {
+        setChatComposerEnabled(false, "Model is loading. Please wait...");
+      } else if (hasModelIssue) {
+        setChatComposerEnabled(false, "Model issue detected. Open Settings to resolve before chatting.");
+      } else {
+        setChatComposerEnabled(true, "");
+      }
+    }
+
+    function setModelLoadProgress(progress, statusText, metaText) {
+      const wrap = document.getElementById("modelLoadProgressWrap");
+      const bar = document.getElementById("modelLoadProgressBar");
+      const text = document.getElementById("modelLoadProgressText");
+      const meta = document.getElementById("modelLoadProgressMeta");
+      if (!wrap || !bar || !text || !meta) return;
+
+      const pct = Math.max(0, Math.min(100, Number(progress || 0)));
+      wrap.classList.remove("hidden");
+      bar.style.width = pct + "%";
+      text.textContent = (statusText || "Loading model...") + " (" + pct + "%)";
+      meta.textContent = metaText || "Loading model into memory. This can take a while for larger models.";
+    }
+
+    function startModelLoadProgress(metaText = "") {
+      isModelLoading = true;
+      modelLoadProgress = 0;
+      setModelLoadUiBusy(true);
+      setModelLoadProgress(modelLoadProgress, "Loading model...", metaText);
+    }
+
+    function finishModelLoadProgress(success, message = "") {
+      isModelLoading = false;
+      activeModelLoadJobId = null;
+      setModelLoadUiBusy(false);
+
+      const wrap = document.getElementById("modelLoadProgressWrap");
+      if (!wrap) return;
+
+      if (success) {
+        setModelLoadProgress(100, "Model loaded", message || "Model is ready.");
+        setTimeout(() => {
+          if (!isModelLoading) {
+            wrap.classList.add("hidden");
+          }
+        }, 900);
+        return;
+      }
+
+      setModelLoadProgress(modelLoadProgress || 0, "Model load failed", message || "Check settings status for details.");
+    }
+
     function applyTheme(theme) {
       currentTheme = theme === "dark" ? "dark" : "light";
       document.documentElement.setAttribute("data-theme", currentTheme);
@@ -1308,6 +1376,10 @@
       return String(value).toLowerCase() === "true";
     }
 
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     async function apiJson(url, options = {}) {
       const response = await fetch(url, options);
       const data = await response.json();
@@ -1414,7 +1486,7 @@
           if (triggerPendingLoad && pendingLoadPayload) {
             const payload = pendingLoadPayload;
             pendingLoadPayload = null;
-            await executeLoad(payload);
+            await executeLoadWithProgress(payload, "Download complete. Loading downloaded model.");
           }
         }
       }
@@ -1576,15 +1648,93 @@
       await refreshStatus();
     }
 
-    async function executeLoad(payload) {
-      const data = await apiJson("/load", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      setSettingsStatus(data);
-      appendMessage("assistant", "Model loaded: " + (data.model_source || data.model_id));
-      await refreshStatus();
+    function applyModelLoadJobProgress(job, fallbackMeta = "") {
+      const pct = Math.max(0, Math.min(100, Number(job.progress || 0)));
+      modelLoadProgress = pct;
+
+      let statusText = "Loading model...";
+      if (job.status === "completed") {
+        statusText = "Model loaded";
+      } else if (job.status === "failed") {
+        statusText = "Model load failed";
+      }
+
+      let meta = String(job.message || "").trim();
+      if (job.current != null && job.total != null) {
+        const countPart = String(job.current) + "/" + String(job.total);
+        meta = meta ? (meta + " (" + countPart + ")") : ("Progress: " + countPart);
+      }
+      if (!meta) {
+        meta = fallbackMeta || "Loading model into memory. This can take a while for larger models.";
+      }
+
+      setModelLoadProgress(pct, statusText, meta);
+    }
+
+    async function pollModelLoadJob(jobId, fallbackMeta = "") {
+      activeModelLoadJobId = jobId;
+      while (activeModelLoadJobId === jobId) {
+        const job = await apiJson("/load/" + encodeURIComponent(jobId));
+        applyModelLoadJobProgress(job, fallbackMeta);
+
+        if (job.status === "completed") {
+          finishModelLoadProgress(true, job.message || "Model is ready.");
+          setSettingsStatus(job.result || job);
+          const result = job.result || {};
+          appendMessage("assistant", "Model loaded: " + (result.model_source || result.model_id || "configured source"));
+          await refreshStatus();
+          return result;
+        }
+
+        if (job.status === "failed") {
+          const msg = String(job.error || job.message || "Model load failed");
+          finishModelLoadProgress(false, msg);
+          setSettingsStatus(job);
+          const err = new Error(msg);
+          err.status = 500;
+          err.payload = job;
+          throw err;
+        }
+
+        await sleep(500);
+      }
+
+      throw new Error("Model load tracking stopped.");
+    }
+
+    async function resumeActiveModelLoad() {
+      if (isModelLoading || activeModelLoadJobId) {
+        return;
+      }
+      const active = await apiJson("/load/active");
+      if (!active || !active.job_id) {
+        return;
+      }
+      startModelLoadProgress(active.message || "Resuming active model load...");
+      try {
+        await pollModelLoadJob(active.job_id, active.message || "");
+      } catch (err) {
+        finishModelLoadProgress(false, String(err));
+      }
+    }
+
+    async function executeLoadWithProgress(payload, metaText = "") {
+      startModelLoadProgress(metaText);
+      try {
+        const started = await apiJson("/load/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const jobId = started && started.job_id ? String(started.job_id) : "";
+        if (!jobId) {
+          throw new Error("Model load did not return a job id.");
+        }
+        return await pollModelLoadJob(jobId, metaText);
+      } catch (err) {
+        finishModelLoadProgress(false, String(err));
+        throw err;
+      }
     }
 
     async function redirectToDownloadAndStart(modelId, cause) {
@@ -1639,7 +1789,7 @@
       }
 
       try {
-        await executeLoad(payload);
+        await executeLoadWithProgress(payload, "Loading selected model and initializing tokenizer.");
       } catch (err) {
         const statusCode = Number(err && err.status);
         const modelIdForDownload = String(payload.model_id || document.getElementById("modelId").value || "").trim();
@@ -1796,6 +1946,7 @@
     switchTab("chat");
     switchSettingsTab("config");
     initDownloadState();
+    resumeActiveModelLoad().catch((err) => setSettingsStatus({ error: String(err) }));
     refreshStatus().catch((err) => setSettingsStatus({ error: String(err) }));
     updateTopbarTitle();
   </script>

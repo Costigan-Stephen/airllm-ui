@@ -17,11 +17,14 @@ from webui.downloads import (
 from webui.model_catalog import discover_models, list_candidate_directories
 from webui.model_runtime import (
     apply_settings,
+    active_load_job,
     get_runtime_field,
     load_model,
+    load_job_snapshot,
     normalize_optional,
     persist_runtime_to_env,
     resolve_requested_source,
+    start_load_job,
     runtime_state,
 )
 from webui.schemas import (
@@ -192,6 +195,38 @@ def hf_download_status(job_id: str):
     return job
 
 
+@app.post("/load/start")
+def preload_model_start(request: Optional[LoadRequest] = Body(default=None)):
+    payload = request or LoadRequest()
+    job_id = start_load_job(
+        {
+            "model_id": payload.model_id,
+            "model_path": payload.model_path,
+            "model_base_dir": payload.model_base_dir,
+            "device": payload.device,
+            "force_reload": payload.force_reload,
+            "persist_env": payload.persist_env,
+        }
+    )
+    return {
+        "status": "started",
+        "job_id": job_id,
+    }
+
+
+@app.get("/load/active")
+def load_active():
+    return active_load_job()
+
+
+@app.get("/load/{job_id}")
+def load_status(job_id: str):
+    job = load_job_snapshot(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"No load job found for id {job_id}")
+    return job
+
+
 @app.post("/load")
 def preload_model(request: Optional[LoadRequest] = Body(default=None)):
     payload = request or LoadRequest()
@@ -264,4 +299,3 @@ def generate(request: GenerateRequest):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=PORT, reload=False)
-

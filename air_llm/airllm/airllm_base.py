@@ -1,5 +1,6 @@
 
 from typing import List, Optional, Tuple, Union
+import os
 from tqdm import tqdm
 from pathlib import Path
 import time
@@ -159,6 +160,7 @@ class AirLLMBaseModel(GenerationMixin):
 
         self.main_input_name = "input_ids"
         self._position_embedding_fallback_warned = False
+        self.show_layer_progress = str(os.getenv('AIRLLM_SHOW_LAYER_PROGRESS', '0')).lower() in ('1', 'true', 'yes', 'on')
 
         # model weights prefetch cuda stream
         self.prefetching = prefetching
@@ -544,10 +546,10 @@ class AirLLMBaseModel(GenerationMixin):
             forward_start = time.process_time()
             forward_start_wall = time.time()
 
-        # Reboot the model to make sure buffers are loaded and memory is clean
-        del self.model
-        clean_memory()
-        self.init_model()
+        # Keep the initialized meta-model between forward calls. Reinitializing
+        # on every token causes repeated full rebuilds during generation.
+        if self.model is None:
+            self.init_model()
 
         batch = [input_ids_unit.to(self.running_device).unsqueeze(0) for input_ids_unit in input_ids]
         n_seq = len(batch[0])
@@ -576,7 +578,9 @@ class AirLLMBaseModel(GenerationMixin):
 
             for i, (layer_name, layer) in tqdm(enumerate(zip(self.layer_names, self.layers)),
                                                desc=f'running layers({self.running_device})',
-                                               total=len(self.layers)):
+                                               total=len(self.layers),
+                                               disable=not self.show_layer_progress,
+                                               leave=False):
 
                 if self.prefetching:
                     if self.profiling_mode:

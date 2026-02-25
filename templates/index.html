@@ -638,6 +638,8 @@
               <div id="activeConversationLabel" class="small">Conversation: -</div>
               <textarea id="prompt" placeholder="Type a message. Enter to send, Shift+Enter for a new line."></textarea>
               <div class="chat-composer-actions">
+                <div id="generationStatus" class="small"></div>
+                <button id="chatStopBtn" class="btn hidden" onclick="cancelGeneration()">Stop</button>
                 <button id="chatSendBtn" class="btn primary" onclick="sendPrompt()">Send</button>
               </div>
             </div>
@@ -756,7 +758,7 @@
               <div class="row">
                 <div>
                   <span class="label">Max New Tokens</span>
-                  <input id="maxNewTokens" type="number" value="64" min="1" max="1024" />
+                  <input id="maxNewTokens" type="number" value="4" min="1" max="1024" />
                 </div>
                 <div>
                   <span class="label">Do Sample</span>
@@ -831,6 +833,10 @@
     let lastStatus = null;
     let currentTheme = "light";
     let isGenerating = false;
+    let activeGenerateAbortController = null;
+    let generationStatusTimer = null;
+    let generationStartedAt = 0;
+    let generationExpectedSeconds = 0;
     let activeDownloadJobId = null;
     let downloadPollTimer = null;
     let pendingLoadPayload = null;
@@ -840,7 +846,8 @@
     let modelLoadProgress = 0;
     const CONVERSATION_STORAGE_KEY = "airllm_conversations_v1";
     const ACTIVE_CONVERSATION_STORAGE_KEY = "airllm_active_conversation_v1";
-    const PROMPT_SETTINGS_STORAGE_KEY = "airllm_prompt_settings_v1";
+    const PROMPT_SETTINGS_STORAGE_KEY = "airllm_prompt_settings_v2";
+    const LEGACY_PROMPT_SETTINGS_STORAGE_KEY = "airllm_prompt_settings_v1";
     const NOTIFICATION_STORAGE_KEY = "airllm_notifications_v1";
     let conversations = [];
     let activeConversationId = null;
@@ -1255,34 +1262,63 @@
 
     function loadPromptSettings() {
       const defaults = {
-        max_new_tokens: 64,
+        max_new_tokens: 4,
         do_sample: "false",
         history_turns: 6,
         system_context: "",
       };
       let parsed = {};
+      let fromLegacy = false;
       try {
-        parsed = JSON.parse(localStorage.getItem(PROMPT_SETTINGS_STORAGE_KEY) || "{}");
+        const rawV2 = localStorage.getItem(PROMPT_SETTINGS_STORAGE_KEY);
+        if (rawV2) {
+          parsed = JSON.parse(rawV2);
+        } else {
+          const rawLegacy = localStorage.getItem(LEGACY_PROMPT_SETTINGS_STORAGE_KEY);
+          fromLegacy = !!rawLegacy;
+          parsed = rawLegacy ? JSON.parse(rawLegacy) : {};
+        }
       } catch (_) {
         parsed = {};
       }
+      if (!parsed || typeof parsed !== "object") {
+        parsed = {};
+      }
+
+      let maxNewTokens = Number(parsed.max_new_tokens);
+      if (!Number.isFinite(maxNewTokens) || maxNewTokens <= 0) {
+        maxNewTokens = defaults.max_new_tokens;
+      }
+      if (fromLegacy && maxNewTokens === 64) {
+        maxNewTokens = defaults.max_new_tokens;
+      }
+
+      const historyTurnsRaw = Number(parsed.history_turns);
+      const historyTurns = Number.isFinite(historyTurnsRaw) && historyTurnsRaw >= 0
+        ? historyTurnsRaw
+        : defaults.history_turns;
+
       const settings = {
-        max_new_tokens: Number(parsed.max_new_tokens || defaults.max_new_tokens),
+        max_new_tokens: maxNewTokens,
         do_sample: parsed.do_sample === "true" ? "true" : defaults.do_sample,
-        history_turns: Number(parsed.history_turns || defaults.history_turns),
+        history_turns: historyTurns,
         system_context: String(parsed.system_context || defaults.system_context),
       };
+
       document.getElementById("maxNewTokens").value = String(settings.max_new_tokens);
       document.getElementById("doSample").value = settings.do_sample;
       document.getElementById("historyTurns").value = String(settings.history_turns);
       document.getElementById("systemContext").value = settings.system_context;
+      localStorage.setItem(PROMPT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
     }
 
     function savePromptSettings(showStatus = true) {
+      const maxTokensRaw = Number(document.getElementById("maxNewTokens").value);
+      const historyTurnsRaw = Number(document.getElementById("historyTurns").value);
       const payload = {
-        max_new_tokens: Number(document.getElementById("maxNewTokens").value || 64),
+        max_new_tokens: Number.isFinite(maxTokensRaw) && maxTokensRaw > 0 ? maxTokensRaw : 4,
         do_sample: String(document.getElementById("doSample").value || "false").toLowerCase() === "true" ? "true" : "false",
-        history_turns: Number(document.getElementById("historyTurns").value || 6),
+        history_turns: Number.isFinite(historyTurnsRaw) && historyTurnsRaw >= 0 ? historyTurnsRaw : 6,
         system_context: String(document.getElementById("systemContext").value || ""),
       };
       localStorage.setItem(PROMPT_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
@@ -1503,17 +1539,73 @@
     function setChatComposerEnabled(enabled, issueMessage = "") {
       const promptBox = document.getElementById("prompt");
       const sendBtn = document.getElementById("chatSendBtn");
+      const stopBtn = document.getElementById("chatStopBtn");
       const hint = document.getElementById("chatInputHint");
+      const shouldDisableInput = !enabled || isGenerating;
       if (promptBox) {
-        promptBox.disabled = !enabled;
+        promptBox.disabled = shouldDisableInput;
       }
       if (sendBtn) {
-        sendBtn.disabled = !enabled;
+        sendBtn.disabled = shouldDisableInput;
       }
-      if (hint) {
+      if (stopBtn) {
+        stopBtn.classList.toggle("hidden", !isGenerating);
+      }
+      if (hint && !isGenerating) {
         hint.textContent = enabled
           ? "Press Enter to send"
           : (issueMessage || "Model issue detected. Open Settings to resolve before chatting.");
+      }
+    }
+
+    function updateGenerationStatusLabel() {
+      const statusEl = document.getElementById("generationStatus");
+      if (!statusEl) {
+        return;
+      }
+      if (!isGenerating) {
+        statusEl.textContent = "";
+        return;
+      }
+      const elapsedSec = Math.max(0, Math.floor((Date.now() - generationStartedAt) / 1000));
+      if (generationExpectedSeconds > 0) {
+        const remainingSec = Math.max(0, Math.floor(generationExpectedSeconds - elapsedSec));
+        statusEl.textContent = "Generating... " + elapsedSec + "s elapsed" + (remainingSec > 0 ? " (~" + remainingSec + "s est left)" : "");
+      } else {
+        statusEl.textContent = "Generating... " + elapsedSec + "s elapsed";
+      }
+    }
+
+    function setGeneratingState(active, maxNewTokens = 0) {
+      if (generationStatusTimer) {
+        clearInterval(generationStatusTimer);
+        generationStatusTimer = null;
+      }
+
+      if (active) {
+        generationStartedAt = Date.now();
+        generationExpectedSeconds = Math.max(0, Number(maxNewTokens || 0)) * 9;
+        updateGenerationStatusLabel();
+        generationStatusTimer = setInterval(updateGenerationStatusLabel, 1000);
+      } else {
+        generationStartedAt = 0;
+        generationExpectedSeconds = 0;
+        updateGenerationStatusLabel();
+      }
+
+      const issueMessage = hasModelIssue
+        ? "Model issue detected. Open Settings to resolve before chatting."
+        : "";
+      const enabled = !hasModelIssue && !isModelLoading;
+      setChatComposerEnabled(enabled, issueMessage);
+    }
+
+    function cancelGeneration() {
+      if (!isGenerating) {
+        return;
+      }
+      if (activeGenerateAbortController) {
+        activeGenerateAbortController.abort();
       }
     }
 
@@ -2124,25 +2216,50 @@
       appendMessage("user", trimmedPrompt, targetConversationId);
       document.getElementById("prompt").value = "";
       const assistantMessageId = appendMessage("assistant", "Generating...", targetConversationId);
-      isGenerating = true;
+
+      const requestedMaxNewTokens = Math.max(1, Number(document.getElementById("maxNewTokens").value || 4));
       const payload = {
         prompt: modelPrompt,
-        max_new_tokens: Number(document.getElementById("maxNewTokens").value || 64),
+        max_new_tokens: requestedMaxNewTokens,
         do_sample: asBool(document.getElementById("doSample").value)
       };
+
+      if (requestedMaxNewTokens > 16) {
+        pushNotification(
+          "High max token count (" + requestedMaxNewTokens + ") may take a while in current no-cache mode.",
+          "warning"
+        );
+      }
+
+      const controller = new AbortController();
+      activeGenerateAbortController = controller;
+      isGenerating = true;
+      setGeneratingState(true, requestedMaxNewTokens);
+
       try {
         const data = await apiJson("/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal: controller.signal,
         });
         updateMessageText(assistantMessageId, data.generated_text || data.text || "", targetConversationId);
         await refreshStatus();
       } catch (err) {
-        const errMsg = String(err);
-        updateMessageText(assistantMessageId, "Error: " + errMsg, targetConversationId);
+        const aborted = (controller.signal && controller.signal.aborted) || (err && err.name === "AbortError");
+        if (aborted) {
+          updateMessageText(assistantMessageId, "Generation cancelled.", targetConversationId);
+          pushNotification("Generation cancelled.", "info");
+        } else {
+          const errMsg = String(err);
+          updateMessageText(assistantMessageId, "Error: " + errMsg, targetConversationId);
+        }
       } finally {
+        if (activeGenerateAbortController === controller) {
+          activeGenerateAbortController = null;
+        }
         isGenerating = false;
+        setGeneratingState(false);
       }
     }
 

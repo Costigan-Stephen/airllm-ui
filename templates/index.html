@@ -1665,14 +1665,41 @@
     }
 
     async function apiJson(url, options = {}) {
-      const response = await fetch(url, options);
-      const data = await response.json();
+      let response;
+      try {
+        response = await fetch(url, options);
+      } catch (fetchErr) {
+        const error = new Error(
+          "Network error contacting backend. Check that app.py is still running and review terminal logs for OOM/crash details."
+        );
+        error.isNetworkError = true;
+        error.cause = fetchErr;
+        throw error;
+      }
+
+      let data = null;
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        try {
+          data = await response.json();
+        } catch (_) {
+          data = null;
+        }
+      } else {
+        try {
+          const raw = await response.text();
+          data = raw ? { detail: raw } : null;
+        } catch (_) {
+          data = null;
+        }
+      }
+
       if (!response.ok) {
         let message = "";
         if (data && typeof data === "object" && data.detail) {
           message = String(data.detail);
         } else {
-          message = typeof data === "object" ? JSON.stringify(data) : String(data);
+          message = typeof data === "object" ? JSON.stringify(data) : String(data || "Request failed.");
         }
         const error = new Error(message);
         error.status = response.status;
@@ -1864,10 +1891,59 @@
       }
     }
 
+    function normalizeRepoPath(value) {
+      return String(value || "")
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\/+|\/+$/g, "");
+    }
+
+    function deriveModelIdFromSelection(baseDir, selectedPath, selectedLabel = "") {
+      const cleanLabel = normalizeRepoPath(selectedLabel);
+      if (cleanLabel && cleanLabel !== ".") {
+        return cleanLabel;
+      }
+
+      const cleanBase = normalizeRepoPath(baseDir);
+      const cleanPath = normalizeRepoPath(selectedPath);
+      if (!cleanPath) {
+        return "";
+      }
+
+      if (cleanBase) {
+        const lowerBase = cleanBase.toLowerCase();
+        const lowerPath = cleanPath.toLowerCase();
+        if (lowerPath === lowerBase) {
+          const baseParts = cleanPath.split("/");
+          return baseParts[baseParts.length - 1] || "";
+        }
+        const prefix = lowerBase + "/";
+        if (lowerPath.startsWith(prefix)) {
+          return cleanPath.slice(cleanBase.length + 1);
+        }
+      }
+
+      const parts = cleanPath.split("/");
+      return parts[parts.length - 1] || "";
+    }
+
     function applySelectedModel() {
-      const selected = document.getElementById("modelSelect").value;
-      if (selected) {
-        document.getElementById("modelPath").value = selected;
+      const select = document.getElementById("modelSelect");
+      const selected = select.value;
+      if (!selected) {
+        return;
+      }
+
+      document.getElementById("modelPath").value = selected;
+
+      const selectedOption = select.options[select.selectedIndex];
+      const selectedLabel = selectedOption ? (selectedOption.dataset.modelLabel || "") : "";
+      const baseDir = document.getElementById("modelBaseDir").value || "";
+      const inferredModelId = deriveModelIdFromSelection(baseDir, selected, selectedLabel);
+
+      if (inferredModelId) {
+        document.getElementById("modelId").value = inferredModelId;
+        document.getElementById("hfModelId").value = inferredModelId;
       }
     }
 
@@ -1902,6 +1978,7 @@
         const option = document.createElement("option");
         option.value = model.path;
         option.textContent = "[model] " + model.label + " -> " + model.path;
+        option.dataset.modelLabel = model.label || "";
         if (selectedPath && selectedPath === model.path) {
           option.selected = true;
         }
@@ -2251,8 +2328,15 @@
           updateMessageText(assistantMessageId, "Generation cancelled.", targetConversationId);
           pushNotification("Generation cancelled.", "info");
         } else {
-          const errMsg = String(err);
-          updateMessageText(assistantMessageId, "Error: " + errMsg, targetConversationId);
+          const isNetworkErr = !!(err && (err.isNetworkError || (err.name === "TypeError" && String(err).includes("NetworkError"))));
+          if (isNetworkErr) {
+            const netMsg = "Error: Lost connection to backend. Check app.py terminal logs (possible model crash or OOM).";
+            updateMessageText(assistantMessageId, netMsg, targetConversationId);
+            pushNotification(netMsg, "error");
+          } else {
+            const errMsg = String(err);
+            updateMessageText(assistantMessageId, "Error: " + errMsg, targetConversationId);
+          }
         }
       } finally {
         if (activeGenerateAbortController === controller) {

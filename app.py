@@ -337,17 +337,29 @@ def generate(request: GenerateRequest):
         input_tokens = model.tokenizer(
             [request.prompt],
             return_tensors="pt",
-            return_attention_mask=False,
+            return_attention_mask=True,
             truncation=True,
             max_length=MAX_INPUT_TOKENS,
             padding=False,
         )
 
         input_ids = input_tokens["input_ids"].to(runtime["device"])
+        attention_mask = input_tokens.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(runtime["device"])
+
         generate_kwargs = {
             "max_new_tokens": request.max_new_tokens,
             "use_cache": False,
         }
+        if attention_mask is not None:
+            generate_kwargs["attention_mask"] = attention_mask
+
+        eos_token_id = getattr(model.tokenizer, "eos_token_id", None)
+        pad_token_id = getattr(model.tokenizer, "pad_token_id", None)
+        if eos_token_id is not None:
+            generate_kwargs.setdefault("eos_token_id", eos_token_id)
+            generate_kwargs.setdefault("pad_token_id", pad_token_id or eos_token_id)
         if request.do_sample:
             generate_kwargs.update(
                 {
@@ -365,6 +377,11 @@ def generate(request: GenerateRequest):
             fallback_kwargs = {
                 "max_new_tokens": request.max_new_tokens,
             }
+            if attention_mask is not None:
+                fallback_kwargs["attention_mask"] = attention_mask
+            if eos_token_id is not None:
+                fallback_kwargs.setdefault("eos_token_id", eos_token_id)
+                fallback_kwargs.setdefault("pad_token_id", pad_token_id or eos_token_id)
             if request.do_sample:
                 fallback_kwargs.update(
                     {

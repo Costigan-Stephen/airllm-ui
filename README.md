@@ -136,6 +136,10 @@ python app.py
 
 Open `http://127.0.0.1:8000`.
 
+Dependency note:
+* `transformers` is intentionally pinned to `4.56.2` for runtime compatibility with this app.
+* Avoid upgrading `transformers` to latest unless you are testing compatibility changes.
+
 ### First-run setup (recommended)
 
 1. Open the **Settings** tab.
@@ -403,3 +407,4 @@ Welcomed contributions, ideas and discussions!
 If you find it useful, please ⭐ or buy me a coffee! 🙏
 
 [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://bmc.link/lyogavinQ)
+

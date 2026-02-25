@@ -13,6 +13,7 @@ from webui.downloads import (
     active_download,
     download_job_snapshot,
     parse_patterns,
+    normalize_hf_repo_id,
     resolve_hf_download_dir,
     start_hf_download_job,
 )
@@ -212,7 +213,7 @@ def list_models(base_dir: Optional[str] = None):
 
 @app.post("/hf/download")
 def hf_download(request: HFDownloadRequest):
-    model_id = normalize_optional(request.model_id)
+    model_id = normalize_hf_repo_id(request.model_id)
     if not model_id:
         raise HTTPException(status_code=400, detail="model_id is required.")
 
@@ -423,6 +424,7 @@ def generate(request: GenerateRequest):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=PORT, reload=False)
+
 
 
 

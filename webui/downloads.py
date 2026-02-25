@@ -56,6 +56,16 @@ def _job_log(job_id: str, message: str):
         job["logs"] = logs
 
 
+def normalize_hf_repo_id(model_id: Optional[str]) -> Optional[str]:
+    model_id = normalize_optional(model_id)
+    if not model_id:
+        return None
+
+    # Accept accidental Windows separators and normalize to HF repo syntax.
+    normalized = model_id.replace("\\", "/")
+    normalized = "/".join(part.strip() for part in normalized.split("/") if part.strip())
+    return normalized or None
+
 def parse_patterns(patterns: Optional[str]):
     patterns = normalize_optional(patterns)
     if not patterns:
@@ -69,7 +79,9 @@ def parse_patterns(patterns: Optional[str]):
 
 
 def resolve_hf_download_dir(base_dir: str, model_id: str, subdir: Optional[str]):
-    model_id = model_id.strip()
+    model_id = normalize_hf_repo_id(model_id)
+    if not model_id:
+        raise ValueError("model_id is required.")
     base = Path(base_dir)
     if subdir:
         rel = Path(subdir.strip())
@@ -80,7 +92,7 @@ def resolve_hf_download_dir(base_dir: str, model_id: str, subdir: Optional[str])
 
 
 def _run_hf_download_job(job_id: str, payload: dict):
-    model_id = payload["model_id"]
+    model_id = normalize_hf_repo_id(payload.get("model_id")) or payload.get("model_id")
     base_dir = payload["base_dir"]
     target_dir = payload["target_dir"]
     revision = payload.get("revision")

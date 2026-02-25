@@ -2136,7 +2136,7 @@
     }
 
     async function redirectToDownloadAndStart(modelId, cause) {
-      const resolvedModelId = String(modelId || "").trim();
+      const resolvedModelId = normalizeRepoPath(modelId);
       if (!resolvedModelId) {
         throw new Error("Model load failed with 500, but no model_id is set for auto-download.");
       }
@@ -2190,7 +2190,7 @@
         await executeLoadWithProgress(payload, "Loading selected model and initializing tokenizer.");
       } catch (err) {
         const statusCode = Number(err && err.status);
-        const modelIdForDownload = String(payload.model_id || document.getElementById("modelId").value || "").trim();
+        const modelIdForDownload = normalizeRepoPath(payload.model_id || document.getElementById("modelId").value || "");
         if (statusCode === 500 && modelIdForDownload) {
           try {
             await redirectToDownloadAndStart(modelIdForDownload, err);
@@ -2216,7 +2216,13 @@
         setSettingsStatus({ status: "download_in_progress", job_id: activeDownloadJobId });
         return;
       }
-      const modelId = document.getElementById("hfModelId").value || document.getElementById("modelId").value;
+      const rawModelId = document.getElementById("hfModelId").value || document.getElementById("modelId").value;
+      const modelId = normalizeRepoPath(rawModelId);
+      if (!modelId) {
+        setSettingsStatus({ status: "download_failed", error: "model_id is required." });
+        return;
+      }
+      document.getElementById("hfModelId").value = modelId;
       const payload = {
         model_id: modelId || null,
         base_dir: document.getElementById("modelBaseDir").value || null,
@@ -2251,8 +2257,15 @@
         return;
       }
       const setActive = document.getElementById("modalHfSetActive").checked;
+      const rawModelId = document.getElementById("modalHfModelId").value || document.getElementById("modelId").value || "";
+      const modalModelId = normalizeRepoPath(rawModelId);
+      if (!modalModelId) {
+        setSettingsStatus({ status: "download_failed", error: "model_id is required." });
+        return;
+      }
+      document.getElementById("modalHfModelId").value = modalModelId;
       const payload = {
-        model_id: document.getElementById("modalHfModelId").value || document.getElementById("modelId").value || null,
+        model_id: modalModelId,
         base_dir: document.getElementById("modelBaseDir").value || null,
         subdir: document.getElementById("modalHfSubdir").value || null,
         revision: document.getElementById("modalHfRevision").value || null,
@@ -2384,6 +2397,7 @@
   </script>
 </body>
 </html>
+
 
 
 

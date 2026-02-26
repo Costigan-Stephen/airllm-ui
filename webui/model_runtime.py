@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import sys
+import urllib.error
+import urllib.request
 import threading
 import time
 import uuid
@@ -67,6 +69,33 @@ _LAYERS_RE = re.compile(r"running layers[^\r\n]*?(\d+)\s*/\s*(\d+)", re.IGNORECA
 _COUNT_RE = re.compile(r"(?<![\d:])(\d{1,5})\s*/\s*(\d{1,5})(?![\d:])")
 _PERCENT_RE = re.compile(r"(\d{1,3})%")
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, str(default))).strip())
+    except Exception:
+        return default
+
+
+_LOAD_STALL_WARNING_SECONDS = max(10, _int_env("AIRLLM_LOAD_STALL_WARNING_SECONDS", 45))
+
+
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(str(value).strip())
+    except Exception:
+        return default
 
 class _TransformersRuntimeModel:
     def __init__(self, model, tokenizer):
@@ -125,6 +154,105 @@ class _LlamaCppRuntimeModel:
         if not choices:
             return ""
         return str(choices[0].get("text") or "")
+
+
+class _LlamaServerRuntimeModel:
+    def __init__(self, base_url: str, timeout_sec: float, model_name: Optional[str] = None, probe_path: Optional[str] = None):
+        self.base_url = base_url.rstrip("/")
+        self.timeout_sec = max(5.0, float(timeout_sec))
+        self.model_name = model_name
+        self.probe_path = probe_path
+
+    @staticmethod
+    def _extract_text(payload):
+        if isinstance(payload, dict):
+            if "content" in payload:
+                return str(payload.get("content") or "")
+            if "text" in payload:
+                return str(payload.get("text") or "")
+            choices = payload.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                if isinstance(first, dict):
+                    if "text" in first:
+                        return str(first.get("text") or "")
+                    message = first.get("message")
+                    if isinstance(message, dict):
+                        return str(message.get("content") or "")
+        return ""
+
+    def generate_text(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        do_sample: bool,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+    ) -> str:
+        completion_payload = {
+            "prompt": prompt,
+            "n_predict": int(max_new_tokens),
+            "stream": False,
+        }
+        if do_sample:
+            completion_payload.update(
+                {
+                    "temperature": float(max(0.0, temperature)),
+                    "top_p": float(max(0.0, min(1.0, top_p))),
+                    "top_k": int(max(1, top_k)),
+                }
+            )
+        else:
+            completion_payload.update(
+                {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "top_k": 40,
+                }
+            )
+
+        try:
+            data = _http_request_json(
+                f"{self.base_url}/completion",
+                method="POST",
+                payload=completion_payload,
+                timeout=self.timeout_sec,
+            )
+            text = self._extract_text(data)
+            if text:
+                return text
+            raise RuntimeError(f"llama-server /completion response did not contain text: {data}")
+        except Exception as completion_exc:
+            chat_payload = {
+                "model": self.model_name or "llama-server",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": int(max_new_tokens),
+                "stream": False,
+            }
+            if do_sample:
+                chat_payload["temperature"] = float(max(0.0, temperature))
+                chat_payload["top_p"] = float(max(0.0, min(1.0, top_p)))
+            else:
+                chat_payload["temperature"] = 0.0
+                chat_payload["top_p"] = 1.0
+
+            try:
+                data = _http_request_json(
+                    f"{self.base_url}/v1/chat/completions",
+                    method="POST",
+                    payload=chat_payload,
+                    timeout=self.timeout_sec,
+                )
+                text = self._extract_text(data)
+                if text:
+                    return text
+                raise RuntimeError(f"llama-server /v1/chat/completions response did not contain text: {data}")
+            except Exception as chat_exc:
+                raise RuntimeError(
+                    "llama-server generation failed on both /completion and /v1/chat/completions. "
+                    f"completion_error={completion_exc}; chat_error={chat_exc}"
+                ) from chat_exc
 
 def normalize_optional(value: Optional[str]) -> Optional[str]:
     if value is None:
@@ -419,9 +547,11 @@ def _normalize_runtime_backend(value: Optional[str]) -> Optional[str]:
     if not candidate or candidate == "auto":
         return None
     candidate = candidate.lower()
-    if candidate == "llama.cpp":
+    if candidate in ("llama.cpp", "llama-cpp"):
         candidate = "llama_cpp"
-    if candidate not in ("airllm", "transformers", "llama_cpp"):
+    if candidate in ("llama-server", "llama_server"):
+        candidate = "llama_server"
+    if candidate not in ("airllm", "transformers", "llama_cpp", "llama_server"):
         raise ValueError(f"Unsupported runtime backend: {candidate}")
     return candidate
 
@@ -447,6 +577,83 @@ def _find_local_gguf_path(source_for_load: str) -> Optional[str]:
 
 def _llama_cpp_backend_available() -> bool:
     return Llama is not None
+
+
+
+def _llama_server_base_url() -> str:
+    return normalize_optional(os.getenv("AIRLLM_LLAMA_SERVER_URL")) or "http://127.0.0.1:8080"
+
+
+def _llama_server_timeout_sec() -> float:
+    return max(1.0, _float_env("AIRLLM_LLAMA_SERVER_TIMEOUT_SEC", 60.0))
+
+
+def _http_request_json(url: str, *, method: str = "GET", payload=None, timeout: float = 10.0):
+    headers = {"Accept": "application/json"}
+    body = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {"text": raw}
+    except urllib.error.HTTPError as exc:
+        try:
+            body_text = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body_text = ""
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {body_text}") from exc
+
+
+def _probe_llama_server(base_url: str, timeout: float = 1.5):
+    for path in ("/health", "/props", "/"):
+        try:
+            payload = _http_request_json(f"{base_url.rstrip("/")}{path}", timeout=timeout)
+            return path, payload
+        except Exception:
+            continue
+    raise RuntimeError(f"llama-server not reachable at {base_url}")
+
+
+def _llama_server_backend_available() -> bool:
+    if not _bool_env("AIRLLM_ENABLE_LLAMA_SERVER_FALLBACK", True):
+        return False
+    try:
+        _probe_llama_server(_llama_server_base_url(), timeout=min(2.0, _llama_server_timeout_sec()))
+        return True
+    except Exception:
+        return False
+
+
+def _load_llama_server_model(source_for_load: str, target_device: str):
+    del source_for_load
+    del target_device
+    if not _bool_env("AIRLLM_ENABLE_LLAMA_SERVER_FALLBACK", True):
+        raise RuntimeError("llama-server fallback is disabled by AIRLLM_ENABLE_LLAMA_SERVER_FALLBACK=0")
+
+    base_url = _llama_server_base_url()
+    timeout_sec = _llama_server_timeout_sec()
+    probe_path, probe_payload = _probe_llama_server(base_url, timeout=min(3.0, timeout_sec))
+    model_name = None
+    if isinstance(probe_payload, dict):
+        model_name = probe_payload.get("model") or probe_payload.get("model_path")
+        default_generation = probe_payload.get("default_generation_settings")
+        if model_name is None and isinstance(default_generation, dict):
+            model_name = default_generation.get("model")
+
+    return _LlamaServerRuntimeModel(
+        base_url=base_url,
+        timeout_sec=timeout_sec,
+        model_name=model_name,
+        probe_path=probe_path,
+    )
 
 
 def _load_llama_cpp_model(source_for_load: str, target_device: str):
@@ -483,6 +690,17 @@ def _load_airllm_model(source_for_load: str, target_device: str):
     return AutoModel.from_pretrained(source_for_load, **kwargs)
 
 
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        "cuda out of memory" in message
+        or ("out of memory" in message and "cuda" in message)
+        or "cublas_status_alloc_failed" in message
+        or "cuda error: out of memory" in message
+    )
+
+
 def _load_transformers_model(source_for_load: str, target_device: str):
     if AutoModelForCausalLM is None or AutoTokenizer is None:
         raise RuntimeError(
@@ -493,6 +711,7 @@ def _load_transformers_model(source_for_load: str, target_device: str):
     if HF_TOKEN:
         token_kwargs["token"] = HF_TOKEN
 
+    print(f"Loading tokenizer for {source_for_load}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             source_for_load,
@@ -511,19 +730,57 @@ def _load_transformers_model(source_for_load: str, target_device: str):
     if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs = {"trust_remote_code": True}
-    if HF_TOKEN:
-        model_kwargs["token"] = HF_TOKEN
-    if target_device.startswith("cuda") and torch.cuda.is_available():
-        model_kwargs["torch_dtype"] = "auto"
+    use_cuda = target_device.startswith("cuda")
+    if use_cuda and not torch.cuda.is_available():
+        raise RuntimeError(f"Requested device {target_device}, but CUDA is not available.")
 
+    def _from_pretrained_with_auth(extra_kwargs: dict):
+        load_kwargs = dict(extra_kwargs)
+        if HF_TOKEN:
+            load_kwargs["token"] = HF_TOKEN
+        try:
+            return AutoModelForCausalLM.from_pretrained(source_for_load, **load_kwargs)
+        except TypeError:
+            if "token" in load_kwargs and HF_TOKEN:
+                load_kwargs.pop("token", None)
+                load_kwargs["use_auth_token"] = HF_TOKEN
+                return AutoModelForCausalLM.from_pretrained(source_for_load, **load_kwargs)
+            raise
+
+    base_model_kwargs = {"trust_remote_code": True}
+    if use_cuda and torch.cuda.is_available():
+        base_model_kwargs["torch_dtype"] = "auto"
+
+    if use_cuda:
+        auto_kwargs = dict(base_model_kwargs)
+        auto_kwargs["device_map"] = "auto"
+        auto_kwargs["low_cpu_mem_usage"] = True
+        print("Tokenizer loaded. Trying device_map=auto to reduce GPU memory pressure...")
+        try:
+            hf_model = _from_pretrained_with_auth(auto_kwargs)
+            print("Checkpoint shards loaded with device_map=auto. Finalizing model setup...")
+            hf_model.eval()
+            print("Model is ready.")
+            return _TransformersRuntimeModel(hf_model, tokenizer)
+        except Exception as exc:
+            message = str(exc)
+            if "does not recognize this architecture" in message or "model_type" in message:
+                raise RuntimeError(
+                    "Transformers cannot load this model architecture with the currently installed version. "
+                    "Update Transformers to a version that supports this model_type or use a model with known support. "
+                    f"Original error: {message}"
+                ) from exc
+            if _is_cuda_oom_error(exc):
+                raise RuntimeError(
+                    "CUDA out of memory while loading with Transformers (device_map=auto). "
+                    "This model is too large for the available VRAM. "
+                    "Try AIRLLM_DEVICE=cpu, a smaller model, or a GGUF model with llama.cpp."
+                ) from exc
+            print(f"device_map=auto path failed, retrying direct load path: {exc}")
+
+    print("Loading checkpoint shards with direct load path...")
     try:
-        hf_model = AutoModelForCausalLM.from_pretrained(source_for_load, **model_kwargs)
-    except TypeError:
-        if "token" in model_kwargs:
-            model_kwargs.pop("token", None)
-            model_kwargs["use_auth_token"] = HF_TOKEN
-        hf_model = AutoModelForCausalLM.from_pretrained(source_for_load, **model_kwargs)
+        hf_model = _from_pretrained_with_auth(base_model_kwargs)
     except Exception as exc:
         message = str(exc)
         if "does not recognize this architecture" in message or "model_type" in message:
@@ -534,12 +791,31 @@ def _load_transformers_model(source_for_load: str, target_device: str):
             ) from exc
         raise
 
-    if target_device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError(f"Requested device {target_device}, but CUDA is not available.")
-
-    hf_model.to(target_device)
-    hf_model.eval()
-    return _TransformersRuntimeModel(hf_model, tokenizer)
+    print("Checkpoint shards loaded. Finalizing model setup...")
+    try:
+        if use_cuda:
+            print(f"Moving model to {target_device}...")
+            hf_model.to(target_device)
+            print("Model moved to target device.")
+        else:
+            hf_model.to("cpu")
+        print("Switching model to eval mode...")
+        hf_model.eval()
+        print("Model is ready.")
+        return _TransformersRuntimeModel(hf_model, tokenizer)
+    except Exception as exc:
+        try:
+            hf_model.to("cpu")
+        except Exception:
+            pass
+        del hf_model
+        _cleanup_model()
+        if _is_cuda_oom_error(exc):
+            raise RuntimeError(
+                "CUDA out of memory while finalizing Transformers model on GPU. "
+                "Try AIRLLM_DEVICE=cpu, a smaller model, or a GGUF model with llama.cpp."
+            ) from exc
+        raise
 
 
 def load_model(
@@ -630,6 +906,11 @@ def load_model(
                     raise
             source_for_load = local_source
 
+        allow_airllm_transformers_fallback = _bool_env(
+            "AIRLLM_AIRLLM_TO_TRANSFORMERS_FALLBACK",
+            False,
+        )
+
         if preferred_backend is None:
             if isinstance(local_details, dict):
                 preferred_backend = local_details.get("runtime_mode") or "airllm"
@@ -641,25 +922,52 @@ def load_model(
         allow_llama_cpp = bool(local_expected and gguf_candidate and llama_cpp_available)
 
         llama_cpp_unavailable_reason = None
-        if local_expected and not gguf_candidate:
-            llama_cpp_unavailable_reason = (
-                "No local .gguf found for llama.cpp fallback in the selected model directory."
-            )
-        elif local_expected and gguf_candidate and not llama_cpp_available:
+        # Only surface llama.cpp skip reason when GGUF exists but llama-cpp-python is missing.
+        if local_expected and gguf_candidate and not llama_cpp_available:
             llama_cpp_unavailable_reason = (
                 "llama.cpp fallback is available only when llama-cpp-python is installed in this environment."
             )
 
+        allow_llama_server = _llama_server_backend_available()
+        prefer_llama_server_if_available = _bool_env("AIRLLM_PREFER_LLAMA_SERVER_IF_AVAILABLE", False)
+        llama_server_disable_fallbacks = _bool_env("AIRLLM_LLAMA_SERVER_DISABLE_FALLBACKS", True)
+
+        if allow_llama_server and prefer_llama_server_if_available:
+            preferred_backend = "llama_server"
+
         if preferred_backend == "airllm":
-            backends_to_try = ["airllm", "transformers"]
+            # Default to legacy behavior: keep AirLLM-optimized models on AirLLM runtime only.
+            # Optional opt-in: AIRLLM_AIRLLM_TO_TRANSFORMERS_FALLBACK=1
+            backends_to_try = ["airllm"]
             if allow_llama_cpp:
                 backends_to_try.append("llama_cpp")
+            if allow_llama_server:
+                backends_to_try.append("llama_server")
+            if allow_airllm_transformers_fallback:
+                backends_to_try.append("transformers")
         elif preferred_backend == "llama_cpp":
-            backends_to_try = ["llama_cpp"] if allow_llama_cpp else ["transformers"]
+            backends_to_try = ["llama_cpp"] if allow_llama_cpp else []
+            if allow_llama_server:
+                backends_to_try.append("llama_server")
+            backends_to_try.append("transformers")
+        elif preferred_backend == "llama_server":
+            if allow_llama_server:
+                backends_to_try = ["llama_server"]
+                if not llama_server_disable_fallbacks:
+                    if allow_llama_cpp:
+                        backends_to_try.append("llama_cpp")
+                    backends_to_try.append("transformers")
+            else:
+                backends_to_try = ["transformers"]
+                if allow_llama_cpp:
+                    backends_to_try.append("llama_cpp")
         else:
             backends_to_try = ["transformers"]
             if allow_llama_cpp:
                 backends_to_try.append("llama_cpp")
+            if allow_llama_server:
+                backends_to_try.append("llama_server")
+
 
         last_error = None
         load_errors = []
@@ -682,6 +990,10 @@ def load_model(
                         candidate_note = f"Using llama.cpp backend with GPU offload ({gguf_name})."
                     else:
                         candidate_note = f"Using llama.cpp backend on CPU ({gguf_name})."
+                elif backend_name == "llama_server":
+                    candidate_model = _load_llama_server_model(source_for_load, target_device)
+                    server_label = candidate_model.base_url
+                    candidate_note = f"Using llama-server backend at {server_label}."
                 else:
                     candidate_model = _load_transformers_model(source_for_load, target_device)
                     candidate_note = "Using standard Transformers runtime (AirLLM optimization unavailable for this model)."
@@ -699,6 +1011,11 @@ def load_model(
             except Exception as exc:
                 last_error = exc
                 load_errors.append(f"{backend_name} load failed: {exc}")
+                try:
+                    # Release partial allocations before trying the next backend.
+                    _cleanup_model()
+                except Exception:
+                    pass
 
         if loaded_model is None:
             if llama_cpp_unavailable_reason and not allow_llama_cpp:
@@ -800,7 +1117,18 @@ def load_job_snapshot(job_id: str):
         job = _load_jobs.get(job_id)
         if not job:
             return None
-        return dict(job)
+        snapshot = dict(job)
+
+    if snapshot.get("status") in ("queued", "loading"):
+        updated_at = snapshot.get("updated_at") or snapshot.get("started_at")
+        stall_seconds = max(0, int(time.time() - float(updated_at))) if updated_at else 0
+        snapshot["stall_seconds"] = stall_seconds
+        snapshot["stalled"] = stall_seconds >= _LOAD_STALL_WARNING_SECONDS
+    else:
+        snapshot["stall_seconds"] = 0
+        snapshot["stalled"] = False
+
+    return snapshot
 
 
 def active_load_job():
@@ -810,6 +1138,8 @@ def active_load_job():
             return {"job_id": None, "status": "idle"}
         active.sort(key=lambda item: item.get("started_at", 0), reverse=True)
         job = active[0]
+        updated_at = job.get("updated_at") or job.get("started_at")
+        stall_seconds = max(0, int(time.time() - float(updated_at))) if updated_at else 0
         return {
             "job_id": job.get("job_id"),
             "status": job.get("status"),
@@ -819,8 +1149,9 @@ def active_load_job():
             "progress": job.get("progress"),
             "message": job.get("message"),
             "updated_at": job.get("updated_at"),
+            "stall_seconds": stall_seconds,
+            "stalled": stall_seconds >= _LOAD_STALL_WARNING_SECONDS,
         }
-
 
 
 def _is_load_cancel_requested(job_id: str) -> bool:
@@ -926,6 +1257,22 @@ def _parse_progress_text(job_id: str, text: str):
     if not clean:
         return
 
+    lower_clean = clean.lower()
+    if any(keyword in lower_clean for keyword in (
+        "moving model to",
+        "model moved to target device",
+        "switching model to eval",
+        "finalizing model setup",
+        "model is ready",
+    )):
+        _update_load_progress(
+            job_id,
+            stage="finalizing",
+            progress=99,
+            message=clean,
+        )
+        return
+
     shard_match = _SHARD_RE.search(clean)
     if shard_match:
         current = int(shard_match.group(1))
@@ -971,11 +1318,11 @@ def _parse_progress_text(job_id: str, text: str):
 
     count_match = _COUNT_RE.search(clean)
     pct_match = _PERCENT_RE.search(clean)
-    if count_match and ("layer" in clean.lower() or "shard" in clean.lower()):
+    if count_match and ("layer" in lower_clean or "shard" in lower_clean):
         current = int(count_match.group(1))
         total = int(count_match.group(2))
         pct = int(pct_match.group(1)) if pct_match else (int((current / total) * 100) if total else 0)
-        is_shard = "shard" in clean.lower()
+        is_shard = "shard" in lower_clean
         stage = "loading_shards" if is_shard else "loading_layers"
         label = "Loading shards" if is_shard else "Loading layers"
         message = f"{label} {current}/{total}"
@@ -1009,7 +1356,7 @@ def _parse_progress_text(job_id: str, text: str):
         )
         return
 
-    if any(keyword in clean.lower() for keyword in ("loading", "tokenizer", "config", "split", "checkpoint")):
+    if any(keyword in lower_clean for keyword in ("loading", "tokenizer", "config", "split", "checkpoint")):
         _update_load_progress(job_id, stage="loading", message=clean)
 
 

@@ -1965,6 +1965,9 @@
       } else if (mode === "llama_cpp") {
         badgeEl.classList.add("standard");
         badgeEl.textContent = "Runtime: llama.cpp";
+      } else if (mode === "llama_server") {
+        badgeEl.classList.add("standard");
+        badgeEl.textContent = "Runtime: llama-server";
       } else if (mode === "unsupported") {
         badgeEl.classList.add("error");
         badgeEl.textContent = "Runtime: Unsupported";
@@ -2260,7 +2263,11 @@
       const modelLabel = modelDisplayName(data);
       const runtimeBadge = data.runtime_backend === "airllm"
         ? " [AirLLM]"
-        : (data.runtime_backend === "transformers" ? " [Standard]" : (data.runtime_backend === "llama_cpp" ? " [llama.cpp]" : ""));
+        : (data.runtime_backend === "transformers"
+          ? " [Standard]"
+          : (data.runtime_backend === "llama_cpp"
+            ? " [llama.cpp]"
+            : (data.runtime_backend === "llama_server" ? " [llama-server]" : "")));
       document.getElementById("topbarModel").textContent = "Model: " + modelLabel + runtimeBadge + (data.model_loaded ? "" : " (Issue)");
       await refreshModelIssueIndicator(data);
       document.getElementById("modelId").value = data.model_id || "";
@@ -2274,7 +2281,11 @@
       if (data.model_loaded) {
         const runtimeNote = data.runtime_note || (data.runtime_backend === "airllm"
           ? "AirLLM optimization enabled for the active model."
-          : "Active model is running on standard Transformers runtime.");
+          : (data.runtime_backend === "llama_cpp"
+            ? "Active model is running on llama.cpp runtime."
+            : (data.runtime_backend === "llama_server"
+              ? "Active model is running on llama-server runtime."
+              : "Active model is running on standard Transformers runtime.")));
         setModelOptimizationBadge(data.runtime_backend || null, runtimeNote);
       }
       return data;
@@ -2301,6 +2312,8 @@
       const pct = Math.max(0, Math.min(100, Number(job.progress || 0)));
       modelLoadProgress = pct;
 
+      const stalled = !!job.stalled;
+      const stallSeconds = Math.max(0, Number(job.stall_seconds || 0));
       const isFinalizing = job.status === "loading" && (job.stage === "finalizing" || pct >= 99);
 
       let statusText = "Loading model...";
@@ -2311,7 +2324,7 @@
       } else if (job.status === "failed") {
         statusText = "Model load failed";
       } else if (isFinalizing) {
-        statusText = "Finalizing model...";
+        statusText = stalled ? "Finalizing model (slow)..." : "Finalizing model...";
       }
 
       let meta = String(job.message || "").trim();
@@ -2330,6 +2343,13 @@
         const elapsedSec = Math.max(0, Math.floor((Date.now() / 1000) - startedAt));
         if (elapsedSec >= 10) {
           meta += " | Elapsed: " + elapsedSec + "s";
+        }
+      }
+
+      if (stalled && stallSeconds > 0) {
+        meta += " | No new loader output for " + stallSeconds + "s";
+        if (stallSeconds >= 120) {
+          meta += " | If this does not move, use Stop Load and retry.";
         }
       }
 
@@ -2371,7 +2391,8 @@
           return null;
         }
 
-        await sleep(500);
+        const pollDelayMs = (job.stage === "finalizing" || job.stalled) ? 1500 : 700;
+        await sleep(pollDelayMs);
       }
 
       throw new Error("Model load tracking stopped.");

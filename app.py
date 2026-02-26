@@ -449,7 +449,7 @@ def generate(request: GenerateRequest):
         runtime = runtime_state()
         target_device = runtime.get("device") or "cpu"
 
-        if runtime.get("runtime_backend") == "llama_cpp" and hasattr(model, "generate_text"):
+        if runtime.get("runtime_backend") in ("llama_cpp", "llama_server") and hasattr(model, "generate_text"):
             generated = model.generate_text(
                 prompt=request.prompt,
                 max_new_tokens=request.max_new_tokens,

@@ -13,6 +13,7 @@ from webui.downloads import (
     active_download,
     download_job_snapshot,
     parse_patterns,
+    check_hf_repo_compatibility,
     normalize_hf_repo_id,
     resolve_hf_download_dir,
     start_hf_download_job,
@@ -27,7 +28,9 @@ from webui.model_runtime import (
     looks_like_local_path,
     normalize_optional,
     persist_runtime_to_env,
+    persist_runtime_to_env_if_changed,
     resolve_requested_source,
+    request_stop_load_job,
     start_load_job,
     runtime_state,
 )
@@ -44,7 +47,7 @@ app = FastAPI(title="AirLLM API", version="1.0.0")
 _autoload_lock = threading.Lock()
 _autoload_attempted_source = None
 _autoload_last_error = None
-
+_autoload_job_id = None
 
 def _coerce_local_path_input(model_id: Optional[str], model_path: Optional[str]):
     normalized_model_id = normalize_optional(model_id)
@@ -57,7 +60,7 @@ def _coerce_local_path_input(model_id: Optional[str], model_path: Optional[str])
 
 
 def _maybe_autoload_configured_local_model():
-    global _autoload_attempted_source, _autoload_last_error
+    global _autoload_attempted_source, _autoload_last_error, _autoload_job_id
 
     state = runtime_state()
     if state.get("model_loaded"):
@@ -71,38 +74,62 @@ def _maybe_autoload_configured_local_model():
     if not model_source or not os.path.isdir(model_source):
         return {"status": "skipped_missing_local", "model_source": model_source}
 
+    # Keep this non-blocking: only enqueue/load-job state checks here.
     with _autoload_lock:
+        if _autoload_job_id:
+            snapshot = load_job_snapshot(_autoload_job_id)
+            if snapshot:
+                status = snapshot.get("status")
+                if status in ("queued", "loading"):
+                    return {
+                        "status": "already_loading",
+                        "job_id": _autoload_job_id,
+                        "model_source": model_source,
+                    }
+                if status == "failed":
+                    _autoload_last_error = snapshot.get("error") or snapshot.get("message")
+                elif status == "completed":
+                    _autoload_last_error = None
+
         if _autoload_attempted_source == model_source and _autoload_last_error is not None:
             return {
                 "status": "skipped_previous_failure",
                 "model_source": model_source,
                 "error": _autoload_last_error,
             }
+
         _autoload_attempted_source = model_source
         _autoload_last_error = None
 
     try:
-        load_model(force_reload=False)
+        job_id = start_load_job(
+            {
+                "model_id": resolved.get("model_id"),
+                "model_path": resolved.get("model_path"),
+                "model_base_dir": resolved.get("model_base_dir"),
+                "device": state.get("device"),
+                "force_reload": False,
+                "persist_env": False,
+            }
+        )
         with _autoload_lock:
-            _autoload_last_error = None
-        return {"status": "loaded", "model_source": model_source}
+            _autoload_job_id = job_id
+        return {"status": "started", "job_id": job_id, "model_source": model_source}
     except Exception as exc:
         err = str(exc)
         with _autoload_lock:
             _autoload_last_error = err
-        print(f"[autoloader] Failed to load configured model: {err}")
+        print(f"[autoloader] Failed to enqueue configured model load: {err}")
         traceback.print_exc()
         return {"status": "failed", "model_source": model_source, "error": err}
 
-
 @app.on_event("startup")
 def startup_autoload():
-    _maybe_autoload_configured_local_model()
+    threading.Thread(target=_maybe_autoload_configured_local_model, daemon=True).start()
 
 
 @app.get("/", response_class=HTMLResponse)
 def ui():
-    _maybe_autoload_configured_local_model()
     html = render_ui_html(runtime_state())
     return HTMLResponse(
         html,
@@ -112,7 +139,6 @@ def ui():
             "Expires": "0",
         },
     )
-
 
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
@@ -211,6 +237,15 @@ def list_models(base_dir: Optional[str] = None):
     }
 
 
+@app.get("/hf/compatibility")
+def hf_compatibility(model_id: str, revision: Optional[str] = None):
+    try:
+        return check_hf_repo_compatibility(model_id=model_id, revision=revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Compatibility check failed: {exc}") from exc
+
 @app.post("/hf/download")
 def hf_download(request: HFDownloadRequest):
     model_id = normalize_hf_repo_id(request.model_id)
@@ -295,6 +330,11 @@ def load_active():
     return active_load_job()
 
 
+
+@app.post("/load/stop")
+def load_stop(job_id: Optional[str] = Body(default=None, embed=True)):
+    return request_stop_load_job(job_id)
+
 @app.get("/load/{job_id}")
 def load_status(job_id: str):
     job = load_job_snapshot(job_id)
@@ -315,27 +355,39 @@ def preload_model(request: Optional[LoadRequest] = Body(default=None)):
             device=payload.device,
             force_reload=payload.force_reload,
         )
+
+        persisted_env = False
         if payload.persist_env:
             persist_runtime_to_env()
+            persisted_env = True
+        else:
+            persisted_env = persist_runtime_to_env_if_changed()
+
         return {
             "status": "loaded",
             **runtime_state(),
-            "persist_env": payload.persist_env,
+            "persist_env_requested": payload.persist_env,
+            "persisted_env": persisted_env,
             "env_file": str(ENV_FILE),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Model load failed: {exc}") from exc
 
+def _is_airllm_generation_compat_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    signatures = (
+        "cannot unpack non-iterable nonetype object",
+        "position_embeddings",
+        "_is_stateful",
+        "nonetype object has no attribute 'shape'",
+    )
+    return any(signature in message for signature in signatures)
+
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest):
-    try:
-        model = load_model()
-        runtime = runtime_state()
-        if hasattr(model, "generation_config") and model.generation_config is not None:
-            model.generation_config.use_cache = False
-
-        input_tokens = model.tokenizer(
+    def _build_inputs(current_model, target_device: str):
+        tokenized = current_model.tokenizer(
             [request.prompt],
             return_tensors="pt",
             return_attention_mask=True,
@@ -344,73 +396,108 @@ def generate(request: GenerateRequest):
             padding=False,
         )
 
-        input_ids = input_tokens["input_ids"].to(runtime["device"])
-        attention_mask = input_tokens.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(runtime["device"])
+        input_ids_local = tokenized["input_ids"].to(target_device)
+        attention_mask_local = tokenized.get("attention_mask")
+        if attention_mask_local is not None:
+            attention_mask_local = attention_mask_local.to(target_device)
 
-        generate_kwargs = {
+        kwargs_local = {
             "max_new_tokens": request.max_new_tokens,
             "use_cache": False,
         }
-        if attention_mask is not None:
-            generate_kwargs["attention_mask"] = attention_mask
+        if attention_mask_local is not None:
+            kwargs_local["attention_mask"] = attention_mask_local
 
-        eos_token_id = getattr(model.tokenizer, "eos_token_id", None)
-        pad_token_id = getattr(model.tokenizer, "pad_token_id", None)
-        if eos_token_id is not None:
-            generate_kwargs.setdefault("eos_token_id", eos_token_id)
-            generate_kwargs.setdefault("pad_token_id", pad_token_id or eos_token_id)
+        eos_token_id_local = getattr(current_model.tokenizer, "eos_token_id", None)
+        pad_token_id_local = getattr(current_model.tokenizer, "pad_token_id", None)
+        if eos_token_id_local is not None:
+            kwargs_local.setdefault("eos_token_id", eos_token_id_local)
+            kwargs_local.setdefault("pad_token_id", pad_token_id_local or eos_token_id_local)
+
         if request.do_sample:
-            generate_kwargs.update(
+            kwargs_local.update(
                 {
                     "do_sample": True,
                     "temperature": request.temperature,
                     "top_p": request.top_p,
                     "top_k": request.top_k,
                 }
-            )        try:
-            output = model.generate(input_ids, **generate_kwargs)
-        except TypeError as exc:
-            if "cannot unpack non-iterable NoneType object" not in str(exc):
-                raise
-            traceback.print_exc()
-            fallback_kwargs = {
-                "max_new_tokens": request.max_new_tokens,
-            }
-            if attention_mask is not None:
-                fallback_kwargs["attention_mask"] = attention_mask
-            if eos_token_id is not None:
-                fallback_kwargs.setdefault("eos_token_id", eos_token_id)
-                fallback_kwargs.setdefault("pad_token_id", pad_token_id or eos_token_id)
-            if request.do_sample:
-                fallback_kwargs.update(
-                    {
-                        "do_sample": True,
-                        "temperature": request.temperature,
-                        "top_p": request.top_p,
-                        "top_k": request.top_k,
-                    }
-                )
-            output = model.generate(input_ids, **fallback_kwargs)
+            )
+        return input_ids_local, kwargs_local
 
-        if hasattr(output, "sequences"):
-            sequence = output.sequences[0]
-        elif isinstance(output, tuple):
-            sequence = output[0]
+    def _decode_output(current_model, output_value):
+        if hasattr(output_value, "sequences"):
+            sequence_value = output_value.sequences[0]
+        elif isinstance(output_value, tuple):
+            sequence_value = output_value[0]
         else:
-            sequence = output
-        if getattr(sequence, "ndim", 0) > 1:
-            sequence = sequence[0]
+            sequence_value = output_value
 
-        full_text = model.tokenizer.decode(sequence, skip_special_tokens=True)
-        generated = full_text[len(request.prompt) :].lstrip() if full_text.startswith(request.prompt) else full_text
+        if getattr(sequence_value, "ndim", 0) > 1:
+            sequence_value = sequence_value[0]
+
+        full_text_local = current_model.tokenizer.decode(sequence_value, skip_special_tokens=True)
+        generated_local = (
+            full_text_local[len(request.prompt) :].lstrip()
+            if full_text_local.startswith(request.prompt)
+            else full_text_local
+        )
+        return full_text_local, generated_local
+
+    try:
+        model = load_model()
+        runtime = runtime_state()
+        target_device = runtime.get("device") or "cpu"
+
+        if runtime.get("runtime_backend") == "llama_cpp" and hasattr(model, "generate_text"):
+            generated = model.generate_text(
+                prompt=request.prompt,
+                max_new_tokens=request.max_new_tokens,
+                do_sample=request.do_sample,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+            )
+            full_text = request.prompt + generated
+            runtime = runtime_state()
+            return GenerateResponse(
+                model_id=runtime["model_id"],
+                model_source=runtime["model_source"],
+                device=runtime["device"],
+                runtime_backend=runtime.get("runtime_backend"),
+                runtime_note=runtime.get("runtime_note"),
+                text=full_text,
+                generated_text=generated,
+            )
+
+        if hasattr(model, "generation_config") and model.generation_config is not None:
+            model.generation_config.use_cache = False
+
+        try:
+            input_ids, generate_kwargs = _build_inputs(model, target_device)
+            output = model.generate(input_ids, **generate_kwargs)
+        except Exception as primary_exc:
+            if runtime.get("runtime_backend") == "airllm" and _is_airllm_generation_compat_error(primary_exc):
+                print("[generate] AirLLM generation incompatibility detected; retrying with Transformers runtime fallback.")
+                traceback.print_exc()
+
+                model = load_model(force_reload=True, runtime_backend="transformers")
+                runtime = runtime_state()
+                target_device = runtime.get("device") or "cpu"
+                input_ids, generate_kwargs = _build_inputs(model, target_device)
+                output = model.generate(input_ids, **generate_kwargs)
+            else:
+                raise
+
+        full_text, generated = _decode_output(model, output)
 
         runtime = runtime_state()
         return GenerateResponse(
             model_id=runtime["model_id"],
             model_source=runtime["model_source"],
             device=runtime["device"],
+            runtime_backend=runtime.get("runtime_backend"),
+            runtime_note=runtime.get("runtime_note"),
             text=full_text,
             generated_text=generated,
         )
@@ -421,9 +508,24 @@ def generate(request: GenerateRequest):
             detail=f"Generation failed: {type(exc).__name__}: {exc}",
         ) from exc
 
-
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=PORT, reload=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

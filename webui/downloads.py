@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import time
@@ -9,6 +10,7 @@ from typing import Optional
 from huggingface_hub import HfApi, hf_hub_download
 
 from .config import ENV_FILE, HF_TOKEN
+from .model_catalog import resolve_airllm_runtime_from_architectures
 from .model_runtime import apply_download_result, normalize_optional, persist_runtime_to_env
 
 _download_jobs = {}
@@ -65,6 +67,148 @@ def normalize_hf_repo_id(model_id: Optional[str]) -> Optional[str]:
     normalized = model_id.replace("\\", "/")
     normalized = "/".join(part.strip() for part in normalized.split("/") if part.strip())
     return normalized or None
+
+
+def _get_transformers_support():
+    info = {
+        "available": False,
+        "version": "unknown",
+        "supported_model_types": set(),
+    }
+    try:
+        import transformers
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+        info["available"] = True
+        info["version"] = getattr(transformers, "__version__", "unknown")
+        info["supported_model_types"] = set(CONFIG_MAPPING.keys())
+    except Exception:
+        pass
+    return info
+
+
+def check_hf_repo_compatibility(model_id: str, revision: Optional[str] = None):
+    normalized_model_id = normalize_hf_repo_id(model_id)
+    if not normalized_model_id:
+        raise ValueError("model_id is required.")
+
+    normalized_revision = normalize_optional(revision)
+    api = HfApi(token=HF_TOKEN)
+    repo_files = list(api.list_repo_files(repo_id=normalized_model_id, revision=normalized_revision))
+    repo_files = [path_value for path_value in repo_files if not path_value.endswith("/")]
+
+    has_config = "config.json" in repo_files
+    has_tokenizer = any(
+        candidate in repo_files
+        for candidate in (
+            "tokenizer.json",
+            "tokenizer.model",
+            "tokenizer_config.json",
+            "vocab.json",
+            "merges.txt",
+            "spiece.model",
+        )
+    )
+    has_weights = any(path_value.endswith(".safetensors") or path_value.endswith(".bin") for path_value in repo_files)
+    has_index = (
+        "model.safetensors.index.json" in repo_files
+        or "pytorch_model.bin.index.json" in repo_files
+    )
+
+    config_error = None
+    config_transformers_version = None
+    model_type = None
+    architectures = []
+    if has_config:
+        try:
+            config_path = hf_hub_download(
+                repo_id=normalized_model_id,
+                filename="config.json",
+                revision=normalized_revision,
+                token=HF_TOKEN,
+            )
+            config_data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+            model_type = normalize_optional(str(config_data.get("model_type") or ""))
+            config_transformers_version = normalize_optional(str(config_data.get("transformers_version") or ""))
+            raw_architectures = config_data.get("architectures")
+            if isinstance(raw_architectures, list):
+                architectures = [str(item) for item in raw_architectures if normalize_optional(str(item or ""))]
+        except Exception as exc:
+            config_error = str(exc)
+
+    transformers_support = _get_transformers_support()
+    transformers_model_type_supported = True
+    if model_type and transformers_support["available"]:
+        transformers_model_type_supported = model_type in transformers_support["supported_model_types"]
+
+    airllm_architecture_supported, airllm_runtime_class, airllm_reason = resolve_airllm_runtime_from_architectures(
+        architectures
+    )
+
+    reasons = []
+    warnings = []
+
+    if not has_config:
+        reasons.append("Missing config.json in repository.")
+    if config_error:
+        reasons.append(f"Unable to parse config.json: {config_error}")
+    if not has_weights:
+        reasons.append("No .safetensors or .bin weight files found.")
+    if has_config and not model_type:
+        reasons.append("config.json exists but has no model_type.")
+    if model_type and transformers_support["available"] and not transformers_model_type_supported:
+        reasons.append(
+            f"model_type={model_type} is not supported by installed transformers {transformers_support['version']}."
+        )
+
+    # Unsupported optimization should not block usage; it is reported as a warning.
+    if not airllm_architecture_supported:
+        warnings.append(
+            airllm_reason or "Architecture is not mapped to an optimized AirLLM runtime; standard Transformers runtime will be used."
+        )
+
+    if not has_index:
+        warnings.append(
+            "No sharded weight index found. AirLLM may still work if weights are non-sharded and index generation succeeds."
+        )
+    if not has_tokenizer:
+        warnings.append("No tokenizer files detected (generation may fail even if model loads).")
+    if not transformers_support["available"]:
+        warnings.append("Unable to inspect local transformers model registry.")
+
+    supported = len(reasons) == 0
+    airllm_optimized = bool(supported and airllm_architecture_supported)
+
+    if supported:
+        status = "compatible_with_warnings" if warnings else "compatible"
+        runtime_mode = "airllm" if airllm_optimized else "transformers"
+    else:
+        status = "incompatible"
+        runtime_mode = None
+
+    return {
+        "status": status,
+        "supported": supported,
+        "airllm_optimized": airllm_optimized,
+        "runtime_mode": runtime_mode,
+        "model_id": normalized_model_id,
+        "revision": normalized_revision,
+        "transformers_version": transformers_support["version"],
+        "config_transformers_version": config_transformers_version,
+        "model_type": model_type,
+        "architectures": architectures,
+        "airllm_runtime_class": airllm_runtime_class,
+        "reasons": reasons,
+        "warnings": warnings,
+        "file_checks": {
+            "has_config": has_config,
+            "has_weights": has_weights,
+            "has_index": has_index,
+            "has_tokenizer": has_tokenizer,
+            "repo_file_count": len(repo_files),
+        },
+    }
+
 
 def parse_patterns(patterns: Optional[str]):
     patterns = normalize_optional(patterns)
@@ -216,4 +360,3 @@ def download_job_snapshot(job_id: str):
         if not job:
             return None
         return dict(job)
-

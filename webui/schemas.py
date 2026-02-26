@@ -44,6 +44,7 @@ class GenerateResponse(BaseModel):
     model_id: str
     model_source: str
     device: str
+    runtime_backend: Optional[str] = None
+    runtime_note: Optional[str] = None
     text: str
     generated_text: str
-

@@ -522,6 +522,38 @@
       padding: 2px 7px;
       font-weight: 700;
     }
+    .badge-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+    .status-badge.airllm {
+      background: #14532d;
+      border-color: #166534;
+      color: #dcfce7;
+    }
+    .status-badge.standard {
+      background: #1e3a8a;
+      border-color: #1d4ed8;
+      color: #dbeafe;
+    }
+    .status-badge.error {
+      background: #7f1d1d;
+      border-color: #b91c1c;
+      color: #fee2e2;
+    }
     .hidden { display: none !important; }
     .progress-wrap {
       margin-top: 10px;
@@ -680,7 +712,11 @@
                   <select id="modelSelect" onchange="applySelectedModel()">
                     <option value="">(scan base directory)</option>
                   </select>
-                  <div id="modelScanInfo" class="small" style="margin-top:6px;">Scan to list compatible Transformers model folders.</div>
+                  <div id="modelScanInfo" class="small" style="margin-top:6px;">Scan to list discovered model folders and runtime mode.</div>
+                  <div class="badge-row">
+                    <span id="modelOptimizationBadge" class="status-badge standard">Runtime: Standard</span>
+                    <span id="modelOptimizationHint" class="small">Select a model to view optimization status.</span>
+                  </div>
                 </div>
                 <div>
                   <span class="label">Actions</span>
@@ -703,6 +739,7 @@
               <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn" onclick="saveSettings()">Save Settings</button>
                 <button id="loadModelBtn" class="btn primary" onclick="loadModel()">Load / Reload Model</button>
+                <button id="modelLoadStopBtn" class="btn hidden" onclick="stopModelLoad()">Stop Load</button>
               </div>
               <div id="modelLoadProgressWrap" class="hidden" style="margin-top:10px;">
                 <div id="modelLoadProgressMeta" class="small">Preparing model load...</div>
@@ -736,8 +773,14 @@
                 <span class="small">Set downloaded model as active AIRLLM_MODEL_PATH</span>
               </div>
               <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn" onclick="checkHFCompatibility(true)">Check Compatibility</button>
                 <button id="hfDownloadBtn" class="btn primary" onclick="downloadFromHF()">Download from Hugging Face</button>
               </div>
+              <div id="hfCompatSummary" class="small" style="margin-top:8px;">Compatibility not checked yet.</div>
+              <div class="badge-row">
+                <span id="hfCompatRuntimeBadge" class="status-badge standard">Not checked</span>
+              </div>
+              <div id="hfCompatDetails" class="log-box">Run compatibility check to validate model type and architecture support before downloading.</div>
               <div class="small" style="margin-top:8px;">Downloads are saved under the current base directory.</div>
             </div>
 
@@ -841,6 +884,7 @@
     let downloadPollTimer = null;
     let pendingLoadPayload = null;
     let hasModelIssue = false;
+    let lastHFCompatibility = null;
     let isModelLoading = false;
     let activeModelLoadJobId = null;
     let modelLoadProgress = 0;
@@ -1382,9 +1426,14 @@
 
     function setModelLoadUiBusy(active) {
       const loadButton = document.getElementById("loadModelBtn");
+      const stopButton = document.getElementById("modelLoadStopBtn");
       if (loadButton) {
         loadButton.disabled = !!active;
         loadButton.textContent = active ? "Loading Model..." : "Load / Reload Model";
+      }
+      if (stopButton) {
+        stopButton.classList.toggle("hidden", !active);
+        stopButton.disabled = !active;
       }
       if (active) {
         setChatComposerEnabled(false, "Model is loading. Please wait...");
@@ -1819,7 +1868,7 @@
               model_path: document.getElementById("modelPath").value || null,
               model_base_dir: document.getElementById("modelBaseDir").value || null,
               device: document.getElementById("device").value || null,
-              force_reload: true,
+              force_reload: false,
               persist_env: document.getElementById("persistEnv").checked
             };
             try {
@@ -1898,6 +1947,153 @@
         .replace(/^\/+|\/+$/g, "");
     }
 
+    function setModelOptimizationBadge(runtimeMode, note) {
+      const badgeEl = document.getElementById("modelOptimizationBadge");
+      const hintEl = document.getElementById("modelOptimizationHint");
+      if (!badgeEl || !hintEl) {
+        return;
+      }
+
+      const mode = String(runtimeMode || "").toLowerCase();
+      badgeEl.classList.remove("airllm", "standard", "error");
+      if (mode === "airllm") {
+        badgeEl.classList.add("airllm");
+        badgeEl.textContent = "Runtime: AirLLM Optimized";
+      } else if (mode === "transformers") {
+        badgeEl.classList.add("standard");
+        badgeEl.textContent = "Runtime: Standard Transformers";
+      } else if (mode === "llama_cpp") {
+        badgeEl.classList.add("standard");
+        badgeEl.textContent = "Runtime: llama.cpp";
+      } else if (mode === "unsupported") {
+        badgeEl.classList.add("error");
+        badgeEl.textContent = "Runtime: Unsupported";
+      } else {
+        badgeEl.classList.add("standard");
+        badgeEl.textContent = "Runtime: Not selected";
+      }
+
+      hintEl.textContent = String(note || "Select a model to view optimization status.");
+    }
+    function updateModelBadgeFromSelection() {
+      const select = document.getElementById("modelSelect");
+      if (!select || !select.options || select.selectedIndex < 0) {
+        setModelOptimizationBadge(null, "Select a model to view optimization status.");
+        return;
+      }
+
+      const selected = select.options[select.selectedIndex];
+      if (!selected || !selected.value) {
+        setModelOptimizationBadge(null, "Select a model to view optimization status.");
+        return;
+      }
+
+      const runtimeMode = selected.dataset.runtimeMode || "transformers";
+      const unsupportedReason = selected.dataset.unsupportedReason || "";
+      const note = (runtimeMode === "unsupported" ? unsupportedReason : "") || selected.dataset.optimizationNote || "";
+      setModelOptimizationBadge(runtimeMode, note);
+    }
+    function renderHFCompatibility(data) {
+      const summaryEl = document.getElementById("hfCompatSummary");
+      const detailsEl = document.getElementById("hfCompatDetails");
+      const badgeEl = document.getElementById("hfCompatRuntimeBadge");
+      if (!summaryEl || !detailsEl || !badgeEl) {
+        return;
+      }
+
+      badgeEl.classList.remove("airllm", "standard", "error");
+
+      if (!data) {
+        summaryEl.textContent = "Compatibility not checked yet.";
+        detailsEl.textContent = "Run compatibility check to validate model type and architecture support before downloading.";
+        badgeEl.classList.add("standard");
+        badgeEl.textContent = "Not checked";
+        return;
+      }
+
+      const warningCount = Array.isArray(data.warnings) ? data.warnings.length : 0;
+      const reasonCount = Array.isArray(data.reasons) ? data.reasons.length : 0;
+      const modelType = data.model_type || "-";
+
+      if (data.supported) {
+        if (data.airllm_optimized) {
+          badgeEl.classList.add("airllm");
+          badgeEl.textContent = "AirLLM Optimized";
+          summaryEl.textContent = "Compatible | model_type: " + modelType + (warningCount ? " | warnings: " + warningCount : "");
+        } else {
+          badgeEl.classList.add("standard");
+          badgeEl.textContent = "Standard Transformers";
+          summaryEl.textContent = "Compatible (without AirLLM optimization) | model_type: " + modelType + (warningCount ? " | warnings: " + warningCount : "");
+        }
+      } else {
+        badgeEl.classList.add("error");
+        badgeEl.textContent = "Not Compatible";
+        summaryEl.textContent = "Not compatible | model_type: " + modelType + (reasonCount ? " | reasons: " + reasonCount : "");
+      }
+
+      detailsEl.textContent = JSON.stringify(data, null, 2);
+    }
+    async function checkHFCompatibility(showStatus = false, modelIdOverride = null, revisionOverride = null) {
+      const modelId = normalizeRepoPath(
+        modelIdOverride ||
+        document.getElementById("hfModelId").value ||
+        document.getElementById("modelId").value ||
+        ""
+      );
+      if (!modelId) {
+        const missing = {
+          status: "compatibility_check_failed",
+          supported: false,
+          reasons: ["model_id is required."],
+          warnings: [],
+        };
+        renderHFCompatibility(missing);
+        if (showStatus) {
+          setSettingsStatus(missing);
+        }
+        return missing;
+      }
+
+      document.getElementById("hfModelId").value = modelId;
+      const revision = String(
+        revisionOverride != null ? revisionOverride : (document.getElementById("hfRevision").value || "")
+      ).trim();
+      const url =
+        "/hf/compatibility?model_id=" + encodeURIComponent(modelId) +
+        (revision ? "&revision=" + encodeURIComponent(revision) : "");
+
+      const data = await apiJson(url);
+      lastHFCompatibility = data;
+      renderHFCompatibility(data);
+      if (showStatus) {
+        setSettingsStatus(data);
+      }
+      return data;
+    }
+
+    async function ensureHFCompatibilityBeforeDownload(modelId, revision) {
+      const compatibility = await checkHFCompatibility(false, modelId, revision);
+      if (compatibility && compatibility.supported === false) {
+        const reasons = Array.isArray(compatibility.reasons) && compatibility.reasons.length
+          ? compatibility.reasons
+          : ["Unknown compatibility issue."];
+        const proceed = confirm(
+          "Compatibility check indicates this model may not run with the current runtime.\n\n- " +
+          reasons.join("\n- ") +
+          "\n\nDownload anyway?"
+        );
+        if (!proceed) {
+          setSettingsStatus({
+            status: "download_blocked_by_compatibility_check",
+            model_id: modelId,
+            revision: revision || null,
+            compatibility,
+          });
+          return { proceed: false, compatibility };
+        }
+      }
+      return { proceed: true, compatibility };
+    }
     function deriveModelIdFromSelection(baseDir, selectedPath, selectedLabel = "") {
       const cleanLabel = normalizeRepoPath(selectedLabel);
       if (cleanLabel && cleanLabel !== ".") {
@@ -1931,6 +2127,7 @@
       const select = document.getElementById("modelSelect");
       const selected = select.value;
       if (!selected) {
+        setModelOptimizationBadge(null, "Select a model to view optimization status.");
         return;
       }
 
@@ -1938,6 +2135,9 @@
 
       const selectedOption = select.options[select.selectedIndex];
       const selectedLabel = selectedOption ? (selectedOption.dataset.modelLabel || "") : "";
+      const runtimeMode = selectedOption ? (selectedOption.dataset.runtimeMode || "transformers") : "transformers";
+      const optimizationNote = selectedOption ? (selectedOption.dataset.optimizationNote || "") : "";
+      const unsupportedReason = selectedOption ? (selectedOption.dataset.unsupportedReason || "") : "";
       const baseDir = document.getElementById("modelBaseDir").value || "";
       const inferredModelId = deriveModelIdFromSelection(baseDir, selected, selectedLabel);
 
@@ -1945,8 +2145,19 @@
         document.getElementById("modelId").value = inferredModelId;
         document.getElementById("hfModelId").value = inferredModelId;
       }
-    }
 
+      if (runtimeMode === "unsupported") {
+        const reasonText = unsupportedReason || "This model directory was detected as unsupported by the current runtime checks.";
+        setModelOptimizationBadge("unsupported", reasonText);
+        pushNotification("Unsupported model selected. Reason: " + reasonText, "warning");
+        return;
+      }
+
+      setModelOptimizationBadge(runtimeMode, optimizationNote || "Model selected from discovered checkpoints.");
+      if (runtimeMode === "transformers") {
+        pushNotification("This model is usable, but AirLLM optimizations are unavailable. Standard Transformers runtime will be used.", "info");
+      }
+    }
     function clearModelPath() {
       document.getElementById("modelPath").value = "";
       document.getElementById("modelSelect").value = "";
@@ -1963,45 +2174,77 @@
         option.textContent = "(set AIRLLM_MODEL_BASE_DIR first)";
         select.appendChild(option);
         info.textContent = "Set a base directory, then scan.";
+        setModelOptimizationBadge(null, "Select a model to view optimization status.");
         return;
       }
 
       const data = await apiJson("/models?base_dir=" + encodeURIComponent(baseDir));
+      const models = Array.isArray(data.models) ? data.models : [];
+      const unsupportedModels = Array.isArray(data.unsupported_models) ? data.unsupported_models : [];
 
       const empty = document.createElement("option");
       empty.value = "";
-      const modelCount = (data.models || []).length;
-      empty.textContent = modelCount ? "(select compatible model directory)" : "(no compatible Transformers models found)";
+      const discoveredTotal = models.length + unsupportedModels.length;
+      empty.textContent = discoveredTotal ? "(select discovered model directory)" : "(no model directories found)";
       select.appendChild(empty);
 
-      for (const model of (data.models || [])) {
+      for (const model of models) {
         const option = document.createElement("option");
         option.value = model.path;
-        option.textContent = "[model] " + model.label + " -> " + model.path;
+        const runtimeMode = String(model.runtime_mode || "transformers").toLowerCase() === "airllm" ? "airllm" : "transformers";
+        const badgeLabel = runtimeMode === "airllm" ? "[AirLLM]" : "[Standard]";
+        option.textContent = badgeLabel + " " + model.label + " -> " + model.path;
         option.dataset.modelLabel = model.label || "";
+        option.dataset.runtimeMode = runtimeMode;
+        option.dataset.airllmOptimized = model.airllm_optimized ? "true" : "false";
+        option.dataset.optimizationNote = model.optimization_note || "";
         if (selectedPath && selectedPath === model.path) {
           option.selected = true;
         }
         select.appendChild(option);
       }
 
+      for (const unsupported of unsupportedModels) {
+        const option = document.createElement("option");
+        option.value = unsupported.path;
+        option.textContent = "[Unsupported] " + unsupported.label + " -> " + unsupported.path;
+        option.dataset.modelLabel = unsupported.label || "";
+        option.dataset.runtimeMode = "unsupported";
+        option.dataset.optimizationNote = "Detected as unsupported by runtime checks.";
+        option.dataset.unsupportedReason = unsupported.reason || "Unsupported model directory.";
+        if (selectedPath && selectedPath === unsupported.path) {
+          option.selected = true;
+        }
+        select.appendChild(option);
+      }
+
       if (selectedPath) {
-        const existsInList = (data.models || []).some((m) => m.path === selectedPath);
+        const existsInList =
+          models.some((m) => m.path === selectedPath) ||
+          unsupportedModels.some((m) => m.path === selectedPath);
         if (!existsInList) {
           const current = document.createElement("option");
           current.value = selectedPath;
           current.selected = true;
-          current.textContent = "[current/manual] " + selectedPath;
+          current.textContent = "[manual] " + selectedPath;
+          current.dataset.runtimeMode = "transformers";
+          current.dataset.optimizationNote = "Manual path selected. Runtime mode will be resolved when loaded.";
           select.appendChild(current);
         }
       }
 
-      const unsupportedCount = (data.unsupported_models || []).length;
+      const optimizedCount = models.filter((m) => !!m.airllm_optimized).length;
+      const standardCount = Math.max(0, models.length - optimizedCount);
+      const unsupportedCount = unsupportedModels.length;
       const scanErrorCount = (data.scan_errors || []).length;
       info.textContent =
-        "Compatible models: " + modelCount +
-        " | Unsupported detected: " + unsupportedCount +
+        "Discovered: " + discoveredTotal +
+        " | AirLLM optimized: " + optimizedCount +
+        " | Standard runtime: " + standardCount +
+        " | Unsupported: " + unsupportedCount +
         " | Scan errors: " + scanErrorCount;
+
+      updateModelBadgeFromSelection();
 
       if (!keepStatus) {
         setSettingsStatus(data);
@@ -2010,13 +2253,15 @@
         setSettingsStatus(data);
       }
     }
-
     async function refreshStatus() {
       const data = await apiJson("/health");
       lastStatus = data;
       document.getElementById("runtimeMeta").textContent = JSON.stringify(data, null, 2);
       const modelLabel = modelDisplayName(data);
-      document.getElementById("topbarModel").textContent = "Model: " + modelLabel + (data.model_loaded ? "" : " (Issue)");
+      const runtimeBadge = data.runtime_backend === "airllm"
+        ? " [AirLLM]"
+        : (data.runtime_backend === "transformers" ? " [Standard]" : (data.runtime_backend === "llama_cpp" ? " [llama.cpp]" : ""));
+      document.getElementById("topbarModel").textContent = "Model: " + modelLabel + runtimeBadge + (data.model_loaded ? "" : " (Issue)");
       await refreshModelIssueIndicator(data);
       document.getElementById("modelId").value = data.model_id || "";
       document.getElementById("modelPath").value = data.model_path || "";
@@ -2026,6 +2271,12 @@
         document.getElementById("hfModelId").value = data.model_id || "";
       }
       await refreshModels(data.model_path || "", true);
+      if (data.model_loaded) {
+        const runtimeNote = data.runtime_note || (data.runtime_backend === "airllm"
+          ? "AirLLM optimization enabled for the active model."
+          : "Active model is running on standard Transformers runtime.");
+        setModelOptimizationBadge(data.runtime_backend || null, runtimeNote);
+      }
       return data;
     }
 
@@ -2050,11 +2301,17 @@
       const pct = Math.max(0, Math.min(100, Number(job.progress || 0)));
       modelLoadProgress = pct;
 
+      const isFinalizing = job.status === "loading" && (job.stage === "finalizing" || pct >= 99);
+
       let statusText = "Loading model...";
       if (job.status === "completed") {
         statusText = "Model loaded";
+      } else if (job.status === "canceled") {
+        statusText = "Model load canceled";
       } else if (job.status === "failed") {
         statusText = "Model load failed";
+      } else if (isFinalizing) {
+        statusText = "Finalizing model...";
       }
 
       let meta = String(job.message || "").trim();
@@ -2063,7 +2320,17 @@
         meta = meta ? (meta + " (" + countPart + ")") : ("Progress: " + countPart);
       }
       if (!meta) {
-        meta = fallbackMeta || "Loading model into memory. This can take a while for larger models.";
+        meta = isFinalizing
+          ? "Weights are loaded. Finalizing model setup. This can take extra time for large models."
+          : (fallbackMeta || "Loading model into memory. This can take a while for larger models.");
+      }
+
+      const startedAt = Number(job.started_at || 0);
+      if (startedAt > 0 && (job.status === "loading" || job.status === "queued")) {
+        const elapsedSec = Math.max(0, Math.floor((Date.now() / 1000) - startedAt));
+        if (elapsedSec >= 10) {
+          meta += " | Elapsed: " + elapsedSec + "s";
+        }
       }
 
       setModelLoadProgress(pct, statusText, meta);
@@ -2094,10 +2361,41 @@
           throw err;
         }
 
+
+        if (job.status === "canceled") {
+          const msg = String(job.message || "Model load canceled by user.");
+          finishModelLoadProgress(false, msg);
+          setSettingsStatus(job);
+          pushNotification(msg, "info");
+          await refreshStatus();
+          return null;
+        }
+
         await sleep(500);
       }
 
       throw new Error("Model load tracking stopped.");
+    }
+
+    async function stopModelLoad() {
+      let jobId = activeModelLoadJobId;
+      if (!jobId) {
+        const active = await apiJson("/load/active");
+        jobId = active && active.job_id ? String(active.job_id) : "";
+      }
+      if (!jobId) {
+        setSettingsStatus({ status: "idle", stopped: false, message: "No active model load to stop." });
+        return;
+      }
+      const data = await apiJson("/load/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+      setSettingsStatus(data);
+      if (data && data.stopped) {
+        pushNotification("Model load cancellation requested.", "info");
+      }
     }
 
     async function resumeActiveModelLoad() {
@@ -2135,31 +2433,13 @@
       }
     }
 
-    async function redirectToDownloadAndStart(modelId, cause) {
-      const resolvedModelId = normalizeRepoPath(modelId);
-      if (!resolvedModelId) {
-        throw new Error("Model load failed with 500, but no model_id is set for auto-download.");
-      }
-      document.getElementById("hfModelId").value = resolvedModelId;
-      document.getElementById("hfSetActive").checked = true;
-      switchTab("settings");
-      switchSettingsTab("download");
-      setSettingsStatus({
-        status: "auto_download_triggered_after_load_500",
-        model_id: resolvedModelId,
-        cause: String(cause || "load failed"),
-      });
-      pushNotification("Load failed (500). Starting Hugging Face download for " + resolvedModelId + ".", "warning");
-      await downloadFromHF();
-    }
-
     async function loadModel() {
       const payload = {
         model_id: document.getElementById("modelId").value || null,
         model_path: document.getElementById("modelPath").value || null,
         model_base_dir: document.getElementById("modelBaseDir").value || null,
         device: document.getElementById("device").value || null,
-        force_reload: true,
+        force_reload: false,
         persist_env: document.getElementById("persistEnv").checked
       };
 
@@ -2190,24 +2470,25 @@
         await executeLoadWithProgress(payload, "Loading selected model and initializing tokenizer.");
       } catch (err) {
         const statusCode = Number(err && err.status);
-        const modelIdForDownload = normalizeRepoPath(payload.model_id || document.getElementById("modelId").value || "");
-        if (statusCode === 500 && modelIdForDownload) {
-          try {
-            await redirectToDownloadAndStart(modelIdForDownload, err);
-            return;
-          } catch (downloadErr) {
-            setSettingsStatus({
-              status: "auto_download_failed_after_load_500",
-              model_id: modelIdForDownload,
-              load_error: String(err),
-              download_error: String(downloadErr),
-            });
-            pushNotification("Auto-download failed: " + String(downloadErr), "error");
-            return;
-          }
+        const errText = String(err || "");
+
+        // Missing paths are already handled by /model/resolve.
+        // Avoid auto-download retries for runtime/architecture load failures.
+        setSettingsStatus({
+          status: "load_failed",
+          error: errText,
+          status_code: statusCode || null,
+          note: "Auto-download skipped because model path resolved locally before load attempt.",
+        });
+
+        if (errText.toLowerCase().includes("llama_cpp skipped")) {
+          pushNotification(
+            "Model load failed. llama.cpp fallback was skipped (missing GGUF and/or llama-cpp-python).",
+            "warning"
+          );
+        } else {
+          pushNotification("Model load failed: " + errText, "error");
         }
-        setSettingsStatus({ status: "load_failed", error: String(err), status_code: statusCode || null });
-        pushNotification("Model load failed: " + String(err), "error");
       }
     }
 
@@ -2223,6 +2504,13 @@
         return;
       }
       document.getElementById("hfModelId").value = modelId;
+      const compatibilityGate = await ensureHFCompatibilityBeforeDownload(
+        modelId,
+        document.getElementById("hfRevision").value || ""
+      );
+      if (!compatibilityGate.proceed) {
+        return;
+      }
       const payload = {
         model_id: modelId || null,
         base_dir: document.getElementById("modelBaseDir").value || null,
@@ -2264,6 +2552,13 @@
         return;
       }
       document.getElementById("modalHfModelId").value = modalModelId;
+      const modalCompatibilityGate = await ensureHFCompatibilityBeforeDownload(
+        modalModelId,
+        document.getElementById("modalHfRevision").value || ""
+      );
+      if (!modalCompatibilityGate.proceed) {
+        return;
+      }
       const payload = {
         model_id: modalModelId,
         base_dir: document.getElementById("modelBaseDir").value || null,
@@ -2384,6 +2679,7 @@
     renderMessages();
     renderNotifications();
     loadPromptSettings();
+    renderHFCompatibility(null);
     document.getElementById("maxNewTokens").addEventListener("change", () => savePromptSettings(false));
     document.getElementById("doSample").addEventListener("change", () => savePromptSettings(false));
     document.getElementById("historyTurns").addEventListener("change", () => savePromptSettings(false));
@@ -2397,6 +2693,26 @@
   </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
